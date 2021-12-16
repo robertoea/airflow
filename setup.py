@@ -508,7 +508,7 @@ winrm = [
     'pywinrm~=0.4',
 ]
 yandex = [
-    'yandexcloud>=0.97.0',
+    'yandexcloud>=0.122.0',
 ]
 zendesk = [
     'zdesk',
@@ -521,6 +521,8 @@ zendesk = [
 # mypyd which does not support installing the types dynamically with --install-types
 mypy_dependencies = [
     'mypy==0.910',
+    'types-boto',
+    'types-certifi',
     'types-croniter',
     'types-docutils',
     'types-freezegun',
@@ -534,6 +536,7 @@ mypy_dependencies = [
     'types-setuptools',
     'types-termcolor',
     'types-tabulate',
+    'types-toml',
     'types-Markdown',
     'types-PyMySQL',
     'types-PyYAML',
