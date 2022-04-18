@@ -28,6 +28,89 @@ For high-level changelog, see :doc:`package information including changelog <ind
 
 
 
+2.6.0
+.....
+
+Latest change: 2022-04-10
+
+=================================================================================================  ===========  ===============================================================================
+Commit                                                                                             Committed    Subject
+=================================================================================================  ===========  ===============================================================================
+`7be57eb256 <https://github.com/apache/airflow/commit/7be57eb2566651de89048798766f0ad5f267cdc2>`_  2022-04-10   ``Databricks SQL operators are now Python 3.10 compatible (#22886)``
+`aa8c08db38 <https://github.com/apache/airflow/commit/aa8c08db383ebfabf30a7c2b2debb64c0968df48>`_  2022-04-10   ``Databricks: Correctly handle HTTP exception (#22885)``
+`6933022e94 <https://github.com/apache/airflow/commit/6933022e94acf139b2dea9a589bb8b25c62a5d20>`_  2022-04-10   ``Fix new MyPy errors in main (#22884)``
+`56ab82ed7a <https://github.com/apache/airflow/commit/56ab82ed7a5c179d024722ccc697b740b2b93b6a>`_  2022-04-07   ``Prepare mid-April provider documentation. (#22819)``
+`1b12c93ed3 <https://github.com/apache/airflow/commit/1b12c93ed3efa6a7d42e4f1bfa28376e23739ba1>`_  2022-03-31   ``Refactor 'DatabricksJobRunLink' to not create ad hoc TaskInstances (#22571)``
+`95169d1d07 <https://github.com/apache/airflow/commit/95169d1d07e66a8c7647e5b0f6a14cea57d515fc>`_  2022-03-27   ``Add a link to Databricks Job Run (#22541)``
+`352d7f72dd <https://github.com/apache/airflow/commit/352d7f72dd1e21f1522d69b71917142430548d66>`_  2022-03-27   ``More operators for Databricks Repos (#22422)``
+`c063fc688c <https://github.com/apache/airflow/commit/c063fc688cf20c37ed830de5e3dac4a664fd8241>`_  2022-03-25   ``Update black precommit (#22521)``
+=================================================================================================  ===========  ===============================================================================
+
+2.5.0
+.....
+
+Latest change: 2022-03-22
+
+=================================================================================================  ===========  ==============================================================
+Commit                                                                                             Committed    Subject
+=================================================================================================  ===========  ==============================================================
+`d7dbfb7e26 <https://github.com/apache/airflow/commit/d7dbfb7e26a50130d3550e781dc71a5fbcaeb3d2>`_  2022-03-22   ``Add documentation for bugfix release of Providers (#22383)``
+`cc920963a6 <https://github.com/apache/airflow/commit/cc920963a69aca840394c3c9e60e0c53235a6fe6>`_  2022-03-15   ``Operator for updating Databricks Repos (#22278)``
+=================================================================================================  ===========  ==============================================================
+
+2.4.0
+.....
+
+Latest change: 2022-03-14
+
+=================================================================================================  ===========  =======================================================================
+Commit                                                                                             Committed    Subject
+=================================================================================================  ===========  =======================================================================
+`16adc035b1 <https://github.com/apache/airflow/commit/16adc035b1ecdf533f44fbb3e32bea972127bb71>`_  2022-03-14   ``Add documentation for Classifier release for March 2022 (#22226)``
+`12e9e2c695 <https://github.com/apache/airflow/commit/12e9e2c695f9ebb9d3dde9c0f7dfaa112654f0d6>`_  2022-03-14   ``Databricks hook - retry on HTTP Status 429 as well (#21852)``
+`af9d85ccd8 <https://github.com/apache/airflow/commit/af9d85ccd8abdc3c252c19764d3ea16970ae0f20>`_  2022-03-13   ``Skip some tests for Databricks from running on Python 3.10 (#22221)``
+`4014194320 <https://github.com/apache/airflow/commit/401419432082d222b823e4f2a66f21e5cc3ab28d>`_  2022-03-08   ``Add new options to DatabricksCopyIntoOperator (#22076)``
+=================================================================================================  ===========  =======================================================================
+
+2.3.0
+.....
+
+Latest change: 2022-03-07
+
+=================================================================================================  ===========  =============================================================================
+Commit                                                                                             Committed    Subject
+=================================================================================================  ===========  =============================================================================
+`f5b96315fe <https://github.com/apache/airflow/commit/f5b96315fe65b99c0e2542831ff73a3406c4232d>`_  2022-03-07   ``Add documentation for Feb Providers release (#22056)``
+`62bf1276f6 <https://github.com/apache/airflow/commit/62bf1276f6b6de00779e13749ab92a67890d23f4>`_  2022-03-01   ``Add-showing-runtime-error-feature-to-DatabricksSubmitRunOperator (#21709)``
+`27d19e7626 <https://github.com/apache/airflow/commit/27d19e7626ef80687997a6799762fa00162c1328>`_  2022-02-27   ``Databricks SQL operators (#21363)``
+`a1845c68f9 <https://github.com/apache/airflow/commit/a1845c68f9a04e61dd99ccc0a23d17a277babf57>`_  2022-02-26   ``Databricks: add support for triggering jobs by name (#21663)``
+`7cca82495b <https://github.com/apache/airflow/commit/7cca82495b38d9e3c52a086958f07719981eb1cd>`_  2022-02-15   ``Updated Databricks docs for correct jobs 2.1 API and links (#21494)``
+`0a2d0d1ecb <https://github.com/apache/airflow/commit/0a2d0d1ecbb7a72677f96bc17117799ab40853e0>`_  2022-02-12   ``Added template_ext = ('.json') to databricks operators #18925 (#21530)``
+`d94fa37830 <https://github.com/apache/airflow/commit/d94fa378305957358b910cfb1fe7cb14bc793804>`_  2022-02-08   ``Fixed changelog for January 2022 (delayed) provider's release (#21439)``
+`6c3a67d4fc <https://github.com/apache/airflow/commit/6c3a67d4fccafe4ab6cd9ec8c7bacf2677f17038>`_  2022-02-05   ``Add documentation for January 2021 providers release (#21257)``
+`602abe8394 <https://github.com/apache/airflow/commit/602abe8394fafe7de54df7e73af56de848cdf617>`_  2022-01-20   ``Remove ':type' lines now sphinx-autoapi supports typehints (#20951)``
+=================================================================================================  ===========  =============================================================================
+
+2.2.0
+.....
+
+Latest change: 2021-12-31
+
+=================================================================================================  ===========  ==================================================================================
+Commit                                                                                             Committed    Subject
+=================================================================================================  ===========  ==================================================================================
+`f77417eb0d <https://github.com/apache/airflow/commit/f77417eb0d3f12e4849d80645325c02a48829278>`_  2021-12-31   ``Fix K8S changelog to be PyPI-compatible (#20614)``
+`97496ba2b4 <https://github.com/apache/airflow/commit/97496ba2b41063fa24393c58c5c648a0cdb5a7f8>`_  2021-12-31   ``Update documentation for provider December 2021 release (#20523)``
+`0bf424f37f <https://github.com/apache/airflow/commit/0bf424f37fc2786e7a74e7f1df88dc92538abbd4>`_  2021-12-30   ``Fix mypy databricks operator (#20598)``
+`d56e7b56bb <https://github.com/apache/airflow/commit/d56e7b56bb9827daaf8890557147fd10bdf72a7e>`_  2021-12-30   ``Fix template_fields type to have MyPy friendly Sequence type (#20571)``
+`a0821235fb <https://github.com/apache/airflow/commit/a0821235fb6877a471973295fe42283ef452abf6>`_  2021-12-30   ``Use typed Context EVERYWHERE (#20565)``
+`c5c18c54fa <https://github.com/apache/airflow/commit/c5c18c54fa83463bc953249dc28edcbf7179da17>`_  2021-12-29   ``Databricks: fix verification of Managed Identity (#20550)``
+`d3b3161f0d <https://github.com/apache/airflow/commit/d3b3161f0da47975e779255806a0fb0019cd38df>`_  2021-12-28   ``Remove 'host' as an instance attr in 'DatabricksHook' (#20540)``
+`58afc19377 <https://github.com/apache/airflow/commit/58afc193776a8e811e9a210a18f93dabebc904d4>`_  2021-12-28   ``Add 'wait_for_termination' argument for Databricks Operators (#20536)``
+`e7659d08b0 <https://github.com/apache/airflow/commit/e7659d08b0ca83913bc958f54658385ac77e366a>`_  2021-12-27   ``Update connection object to ''cached_property'' in ''DatabricksHook'' (#20526)``
+`cad39274d9 <https://github.com/apache/airflow/commit/cad39274d9a8eceba2845dc39e8c870959746478>`_  2021-12-14   ``Fix MyPy Errors for Databricks provider. (#20265)``
+=================================================================================================  ===========  ==================================================================================
+
 2.1.0
 .....
 
@@ -36,6 +119,7 @@ Latest change: 2021-12-10
 =================================================================================================  ===========  =================================================================================
 Commit                                                                                             Committed    Subject
 =================================================================================================  ===========  =================================================================================
+`820bfed515 <https://github.com/apache/airflow/commit/820bfed515bd7d6b2fb7aaa31b2e23f98454f870>`_  2021-12-10   ``Prepare docs for provider's RC2 release (#20205)``
 `66f94f95c2 <https://github.com/apache/airflow/commit/66f94f95c2e92baad2761b5a1fa405e36c17808a>`_  2021-12-10   ``Remove db call from 'DatabricksHook.__init__()' (#20180)``
 `545ca59ba9 <https://github.com/apache/airflow/commit/545ca59ba9a0b346cbbf28cc6958f9575e5e6b0b>`_  2021-12-08   ``Unhide changelog entry for databricks (#20128)``
 `637db1a0ba <https://github.com/apache/airflow/commit/637db1a0ba9c8173372f1f5d6f60ec4c4f3699d8>`_  2021-12-07   ``Update documentation for RC2 release of November Databricks Provider (#20086)``

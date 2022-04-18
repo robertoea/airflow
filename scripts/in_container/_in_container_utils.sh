@@ -54,7 +54,7 @@ function assert_in_container() {
 }
 
 function in_container_script_start() {
-    if [[ ${VERBOSE_COMMANDS:="false"} == "true" ]]; then
+    if [[ ${VERBOSE_COMMANDS:="false"} == "true" || ${VERBOSE_COMMANDS} == "True" ]]; then
         set -x
     fi
 }
@@ -63,14 +63,14 @@ function in_container_script_end() {
     #shellcheck disable=2181
     EXIT_CODE=$?
     if [[ ${EXIT_CODE} != 0 ]]; then
-        if [[ "${PRINT_INFO_FROM_SCRIPTS="true"}" == "true" ]]; then
+        if [[ "${PRINT_INFO_FROM_SCRIPTS="true"}" == "true" || "${PRINT_INFO_FROM_SCRIPTS}" == "True" ]]; then
             echo "########################################################################################################################"
             echo "${COLOR_BLUE} [IN CONTAINER]   EXITING ${0} WITH EXIT CODE ${EXIT_CODE}  ${COLOR_RESET}"
             echo "########################################################################################################################"
         fi
     fi
 
-    if [[ ${VERBOSE_COMMANDS} == "true" ]]; then
+    if [[ ${VERBOSE_COMMANDS:="false"} == "true" || ${VERBOSE_COMMANDS} == "True" ]]; then
         set +x
     fi
 }
@@ -242,7 +242,7 @@ function install_released_airflow_version() {
     echo
 
     rm -rf "${AIRFLOW_SOURCES}"/*.egg-info
-    pip install --upgrade "apache-airflow==${version}"
+    pip install "apache-airflow==${version}"
 }
 
 function install_local_airflow_with_eager_upgrade() {
@@ -280,8 +280,10 @@ function install_all_providers_from_pypi_with_eager_upgrade() {
     # Installing it with Airflow makes sure that the version of package that matches current
     # Airflow requirements will be used.
     # shellcheck disable=SC2086
+    # NOTE! Until we unyank the cncf.kubernetes provider, we explicitly install yanked 3.1.2 version
+    # TODO:(potiuk) REMOVE IT WHEN provider is released
     pip install -e ".[${NO_PROVIDERS_EXTRAS}]" "${packages_to_install[@]}" ${EAGER_UPGRADE_ADDITIONAL_REQUIREMENTS} \
-        --upgrade --upgrade-strategy eager
+        --upgrade --upgrade-strategy eager apache-airflow-providers-cncf-kubernetes==3.1.2
 
 }
 
@@ -301,12 +303,26 @@ function install_all_provider_packages_from_sdist() {
     pip install /dist/apache-airflow-*providers-*.tar.gz
 }
 
+function twine_check_provider_packages_from_wheels() {
+    echo
+    echo "Twine check of all provider packages from wheels"
+    echo
+    twine check /dist/apache_airflow*providers_*.whl
+}
+
+function twine_check_provider_packages_from_sdist() {
+    echo
+    echo "Twine check all provider packages from sdist"
+    echo
+    twine check /dist/apache-airflow-*providers-*.tar.gz
+}
+
 function setup_provider_packages() {
     export PACKAGE_TYPE="regular"
     export PACKAGE_PREFIX_UPPERCASE=""
     export PACKAGE_PREFIX_LOWERCASE=""
     export PACKAGE_PREFIX_HYPHEN=""
-    if [[ ${VERBOSE} == "true" ]]; then
+    if [[ ${VERBOSE:="false"} == "true" ||  ${VERBOSE} == "True" ]]; then
         OPTIONAL_VERBOSE_FLAG+=("--verbose")
     fi
     readonly PACKAGE_TYPE
@@ -318,7 +334,7 @@ function setup_provider_packages() {
 
 function install_supported_pip_version() {
     group_start "Install supported PIP version ${AIRFLOW_PIP_VERSION}"
-    pip install --upgrade "pip==${AIRFLOW_PIP_VERSION}"
+    pip install --disable-pip-version-check "pip==${AIRFLOW_PIP_VERSION}"
     group_end
 }
 
@@ -331,36 +347,6 @@ function filename_to_python_module() {
     echo "${no_init//\//.}"
 }
 
-function import_all_provider_classes() {
-    group_start "Import all Airflow classes"
-    # We have to move to a directory where "airflow" is
-    unset PYTHONPATH
-    # We need to make sure we are not in the airflow checkout, otherwise it will automatically be added to the
-    # import path
-    cd /
-
-    declare -a IMPORT_CLASS_PARAMETERS
-
-    PROVIDER_PATHS=$(
-        python3 <<EOF 2>/dev/null
-import airflow.providers;
-path=airflow.providers.__path__
-for p in path._path:
-    print(p)
-EOF
-    )
-    export PROVIDER_PATHS
-
-    echo "Searching for providers packages in:"
-    echo "${PROVIDER_PATHS}"
-
-    while read -r provider_path; do
-        IMPORT_CLASS_PARAMETERS+=("--path" "${provider_path}")
-    done < <(echo "${PROVIDER_PATHS}")
-
-    python3 /opt/airflow/dev/import_all_classes.py "${IMPORT_CLASS_PARAMETERS[@]}"
-    group_end
-}
 
 function in_container_set_colors() {
     COLOR_BLUE=$'\e[34m'
@@ -443,7 +429,7 @@ function get_providers_to_act_on() {
 
 # Starts group for GitHub Actions - makes logs much more readable
 function group_start {
-    if [[ ${GITHUB_ACTIONS=} == "true" ]]; then
+    if [[ ${GITHUB_ACTIONS:="false"} == "true" ||  ${GITHUB_ACTIONS} == "True" ]]; then
         echo "::group::${1}"
     else
         echo
@@ -454,7 +440,7 @@ function group_start {
 
 # Ends group for GitHub Actions
 function group_end {
-    if [[ ${GITHUB_ACTIONS=} == "true" ]]; then
+    if [[ ${GITHUB_ACTIONS:="false"} == "true" ||  ${GITHUB_ACTIONS} == "True" ]]; then
         echo -e "\033[0m"  # Disable any colors set in the group
         echo "::endgroup::"
     fi

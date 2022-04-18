@@ -30,7 +30,6 @@ def failure_callback(context):
     The function that will be executed on failure.
 
     :param context: The context of the executed task.
-    :type context: dict
     """
     message = (
         'AIRFLOW TASK FAILURE TIPS:\n'
@@ -169,9 +168,9 @@ with DAG(
                     "picURL": "https://airflow.apache.org/_images/dags.png",
                 },
                 {
-                    "title": "Airflow tree feed card",
+                    "title": "Airflow grid feed card",
                     "messageURL": "https://airflow.apache.org/docs/apache-airflow/stable/ui.html",
-                    "picURL": "https://airflow.apache.org/_images/tree.png",
+                    "picURL": "https://airflow.apache.org/_images/grid.png",
                 },
                 {
                     "title": "Airflow graph feed card",

@@ -25,6 +25,8 @@ from sqlalchemy.exc import OperationalError
 from airflow.configuration import conf
 from airflow.exceptions import AirflowException
 from airflow.jobs.base_job import BaseJob
+from airflow.listeners.events import register_task_instance_state_events
+from airflow.listeners.listener import get_listener_manager
 from airflow.models.dagrun import DagRun
 from airflow.models.taskinstance import TaskInstance
 from airflow.sentry import Sentry
@@ -74,6 +76,7 @@ class LocalTaskJob(BaseJob):
         super().__init__(*args, **kwargs)
 
     def _execute(self):
+        self._enable_task_listeners()
         self.task_runner = get_task_runner(self)
 
         def signal_handler(signum, frame):
@@ -187,7 +190,7 @@ class LocalTaskJob(BaseJob):
             fqdn = get_hostname()
             same_hostname = fqdn == ti.hostname
             if not same_hostname:
-                self.log.warning(
+                self.log.error(
                     "The recorded hostname %s does not match this instance's hostname %s",
                     ti.hostname,
                     fqdn,
@@ -241,12 +244,12 @@ class LocalTaskJob(BaseJob):
                 session=session,
             ).one()
 
-            # Get a partial dag with just the specific tasks we want to
-            # examine. In order for dep checks to work correctly, we
-            # include ourself (so TriggerRuleDep can check the state of the
-            # task we just executed)
             task = self.task_instance.task
+            assert task.dag  # For Mypy.
 
+            # Get a partial DAG with just the specific tasks we want to examine.
+            # In order for dep checks to work correctly, we include ourself (so
+            # TriggerRuleDep can check the state of the task we just executed).
             partial_dag = task.dag.partial_subset(
                 task.downstream_task_ids,
                 include_downstream=True,
@@ -291,3 +294,12 @@ class LocalTaskJob(BaseJob):
             if dag_run:
                 dag_run.dag = dag
                 dag_run.update_state(session=session, execute_callbacks=True)
+
+    @staticmethod
+    def _enable_task_listeners():
+        """
+        Check if we have any registered listeners, then register sqlalchemy hooks for
+        TI state change if we do.
+        """
+        if get_listener_manager().has_listeners:
+            register_task_instance_state_events()

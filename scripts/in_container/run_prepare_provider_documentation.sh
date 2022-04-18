@@ -18,12 +18,6 @@
 # shellcheck source=scripts/in_container/_in_container_script_init.sh
 . "$( dirname "${BASH_SOURCE[0]}" )/_in_container_script_init.sh"
 
-function import_all_provider_classes() {
-    group_start "Importing all classes"
-    python3 "${AIRFLOW_SOURCES}/dev/import_all_classes.py" --path "airflow/providers"
-    group_end
-}
-
 function verify_provider_packages_named_properly() {
     python3 "${PROVIDER_PACKAGES_DIR}/prepare_provider_packages.py" \
         verify-provider-classes
@@ -46,7 +40,7 @@ function run_prepare_documentation() {
         # There is a separate group created in logs for each provider package
         python3 "${PROVIDER_PACKAGES_DIR}/prepare_provider_packages.py" \
             update-package-documentation \
-            --version-suffix "${VERSION_SUFFIX_FOR_PYPI}" \
+            --version-suffix "${VERSION_SUFFIX_FOR_PYPI=}" \
             --no-git-update \
             "${OPTIONAL_VERBOSE_FLAG[@]}" \
             "${OPTIONAL_RELEASE_VERSION_ARGUMENT[@]}" \
@@ -117,7 +111,7 @@ function run_prepare_documentation() {
         echo "${COLOR_RED}There were errors when preparing documentation. Exiting! ${COLOR_RESET}"
         exit 1
     else
-        if [[ ${GENERATE_PROVIDERS_ISSUE=} == "true" ]]; then
+        if [[ ${GENERATE_PROVIDERS_ISSUE=} == "true" ||  ${GENERATE_PROVIDERS_ISSUE} == "True" ]]; then
             echo
             python3 dev/provider_packages/prepare_provider_packages.py generate-issue-content "${prepared_documentation[@]}"
             echo
@@ -142,7 +136,6 @@ function run_prepare_documentation() {
     fi
 }
 
-
 setup_provider_packages
 
 cd "${AIRFLOW_SOURCES}" || exit 1
@@ -150,7 +143,11 @@ cd "${AIRFLOW_SOURCES}" || exit 1
 export PYTHONPATH="${AIRFLOW_SOURCES}"
 
 install_supported_pip_version
-import_all_provider_classes
+
+group_start "Importing all classes"
+python3 "${AIRFLOW_SOURCES}/dev/import_all_classes.py" --path "airflow/providers"
+group_end
+
 verify_provider_packages_named_properly
 
 OPTIONAL_RELEASE_VERSION_ARGUMENT=()
@@ -160,7 +157,7 @@ if [[ $# != "0" && ${1} =~ ^[0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]$ ]]; th
 fi
 
 OPTIONAL_NON_INTERACTIVE_FLAG=()
-if [[ ${NON_INTERACTIVE=} == "true" ]]; then
+if [[ ${NON_INTERACTIVE=} == "true" || ${NON_INTERACTIVE} == "True" ]]; then
     OPTIONAL_NON_INTERACTIVE_FLAG+=("--non-interactive")
 fi
 

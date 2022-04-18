@@ -23,6 +23,7 @@ import gzip as gz
 import io
 import re
 import shutil
+from datetime import datetime
 from functools import wraps
 from inspect import signature
 from io import BytesIO
@@ -104,7 +105,7 @@ class S3Hook(AwsBaseHook):
     """
 
     conn_type = 's3'
-    hook_name = 'S3'
+    hook_name = 'Amazon S3'
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs['client_type'] = 's3'
@@ -132,7 +133,6 @@ class S3Hook(AwsBaseHook):
         Parses the S3 Url into a bucket name and key.
 
         :param s3url: The S3 Url to parse.
-        :rtype s3url: str
         :return: the parsed bucket name and key
         :rtype: tuple of str
         """
@@ -152,7 +152,6 @@ class S3Hook(AwsBaseHook):
         Check if bucket_name exists.
 
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :return: True if it exists and False if not.
         :rtype: bool
         """
@@ -164,16 +163,17 @@ class S3Hook(AwsBaseHook):
             return False
 
     @provide_bucket_name
-    def get_bucket(self, bucket_name: Optional[str] = None) -> str:
+    def get_bucket(self, bucket_name: Optional[str] = None) -> object:
         """
         Returns a boto3.S3.Bucket object
 
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :return: the bucket object to the bucket name.
         :rtype: boto3.S3.Bucket
         """
-        session, endpoint_url = self._get_credentials()
+        # Buckets have no regions, and we cannot remove the region name from _get_credentials as we would
+        # break compatibility, so we set it explicitly to None.
+        session, endpoint_url = self._get_credentials(region_name=None)
         s3_resource = session.resource(
             "s3",
             endpoint_url=endpoint_url,
@@ -188,9 +188,7 @@ class S3Hook(AwsBaseHook):
         Creates an Amazon S3 bucket.
 
         :param bucket_name: The name of the bucket
-        :type bucket_name: str
         :param region_name: The name of the aws region in which to create the bucket.
-        :type region_name: str
         """
         if not region_name:
             region_name = self.get_conn().meta.region_name
@@ -207,11 +205,8 @@ class S3Hook(AwsBaseHook):
         Checks that a prefix exists in a bucket
 
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :param prefix: a key prefix
-        :type prefix: str
         :param delimiter: the delimiter marks key hierarchy.
-        :type delimiter: str
         :return: False if the prefix does not exist in the bucket and True if it does.
         :rtype: bool
         """
@@ -234,15 +229,10 @@ class S3Hook(AwsBaseHook):
         Lists prefixes in a bucket under prefix
 
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :param prefix: a key prefix
-        :type prefix: str
         :param delimiter: the delimiter marks key hierarchy.
-        :type delimiter: str
         :param page_size: pagination size
-        :type page_size: int
         :param max_items: maximum items to return
-        :type max_items: int
         :return: a list of matched prefixes
         :rtype: list
         """
@@ -266,6 +256,18 @@ class S3Hook(AwsBaseHook):
 
         return prefixes
 
+    def _list_key_object_filter(
+        self, keys: list, from_datetime: Optional[datetime] = None, to_datetime: Optional[datetime] = None
+    ) -> list:
+        def _is_in_period(input_date: datetime) -> bool:
+            if from_datetime is not None and input_date <= from_datetime:
+                return False
+            if to_datetime is not None and input_date > to_datetime:
+                return False
+            return True
+
+        return [k['Key'] for k in keys if _is_in_period(k['LastModified'])]
+
     @provide_bucket_name
     def list_keys(
         self,
@@ -274,25 +276,53 @@ class S3Hook(AwsBaseHook):
         delimiter: Optional[str] = None,
         page_size: Optional[int] = None,
         max_items: Optional[int] = None,
+        start_after_key: Optional[str] = None,
+        from_datetime: Optional[datetime] = None,
+        to_datetime: Optional[datetime] = None,
+        object_filter: Optional[Callable[..., list]] = None,
     ) -> list:
         """
         Lists keys in a bucket under prefix and not containing delimiter
 
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :param prefix: a key prefix
-        :type prefix: str
         :param delimiter: the delimiter marks key hierarchy.
-        :type delimiter: str
         :param page_size: pagination size
-        :type page_size: int
         :param max_items: maximum items to return
-        :type max_items: int
+        :param start_after_key: should return only keys greater than this key
+        :param from_datetime: should return only keys with LastModified attr greater than this equal
+            from_datetime
+        :param to_datetime: should return only keys with LastModified attr less than this to_datetime
+        :param object_filter: Function that receives the list of the S3 objects, from_datetime and
+            to_datetime and returns the List of matched key.
+
+        **Example**: Returns the list of S3 object with LastModified attr greater than from_datetime
+             and less than to_datetime:
+
+        .. code-block:: python
+
+            def object_filter(
+                keys: list,
+                from_datetime: Optional[datetime] = None,
+                to_datetime: Optional[datetime] = None,
+            ) -> list:
+                def _is_in_period(input_date: datetime) -> bool:
+                    if from_datetime is not None and input_date < from_datetime:
+                        return False
+
+                    if to_datetime is not None and input_date > to_datetime:
+                        return False
+                    return True
+
+                return [k["Key"] for k in keys if _is_in_period(k["LastModified"])]
+
         :return: a list of matched keys
         :rtype: list
         """
         prefix = prefix or ''
         delimiter = delimiter or ''
+        start_after_key = start_after_key or ''
+        self.object_filter_usr = object_filter
         config = {
             'PageSize': page_size,
             'MaxItems': max_items,
@@ -300,16 +330,74 @@ class S3Hook(AwsBaseHook):
 
         paginator = self.get_conn().get_paginator('list_objects_v2')
         response = paginator.paginate(
-            Bucket=bucket_name, Prefix=prefix, Delimiter=delimiter, PaginationConfig=config
+            Bucket=bucket_name,
+            Prefix=prefix,
+            Delimiter=delimiter,
+            PaginationConfig=config,
+            StartAfter=start_after_key,
         )
 
         keys = []
         for page in response:
             if 'Contents' in page:
                 for k in page['Contents']:
-                    keys.append(k['Key'])
+                    keys.append(k)
 
-        return keys
+        if self.object_filter_usr is not None:
+            return self.object_filter_usr(keys, from_datetime, to_datetime)
+
+        return self._list_key_object_filter(keys, from_datetime, to_datetime)
+
+    @provide_bucket_name
+    def get_file_metadata(
+        self,
+        prefix: str,
+        bucket_name: Optional[str] = None,
+        page_size: Optional[int] = None,
+        max_items: Optional[int] = None,
+    ) -> List:
+        """
+        Lists metadata objects in a bucket under prefix
+
+        :param prefix: a key prefix
+        :param bucket_name: the name of the bucket
+        :param page_size: pagination size
+        :param max_items: maximum items to return
+        :return: a list of metadata of objects
+        :rtype: list
+        """
+        config = {
+            'PageSize': page_size,
+            'MaxItems': max_items,
+        }
+
+        paginator = self.get_conn().get_paginator('list_objects_v2')
+        response = paginator.paginate(Bucket=bucket_name, Prefix=prefix, PaginationConfig=config)
+
+        files = []
+        for page in response:
+            if 'Contents' in page:
+                files += page['Contents']
+        return files
+
+    @provide_bucket_name
+    @unify_bucket_name_and_key
+    def head_object(self, key: str, bucket_name: Optional[str] = None) -> Optional[dict]:
+        """
+        Retrieves metadata of an object
+
+        :param key: S3 key that will point to the file
+        :param bucket_name: Name of the bucket in which the file is stored
+        :return: metadata of an object
+        :rtype: dict
+        """
+        try:
+            return self.get_conn().head_object(Bucket=bucket_name, Key=key)
+        except ClientError as e:
+            if e.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+                return None
+            else:
+                raise e
 
     @provide_bucket_name
     @unify_bucket_name_and_key
@@ -318,20 +406,12 @@ class S3Hook(AwsBaseHook):
         Checks if a key exists in a bucket
 
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which the file is stored
-        :type bucket_name: str
         :return: True if the key exists and False if not.
         :rtype: bool
         """
-        try:
-            self.get_conn().head_object(Bucket=bucket_name, Key=key)
-            return True
-        except ClientError as e:
-            if e.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
-                return False
-            else:
-                raise e
+        obj = self.head_object(key, bucket_name)
+        return obj is not None
 
     @provide_bucket_name
     @unify_bucket_name_and_key
@@ -340,13 +420,13 @@ class S3Hook(AwsBaseHook):
         Returns a boto3.s3.Object
 
         :param key: the path to the key
-        :type key: str
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :return: the key object from the bucket
         :rtype: boto3.s3.Object
         """
-        session, endpoint_url = self._get_credentials()
+        # Buckets have no regions, and we cannot remove the region name from _get_credentials as we would
+        # break compatibility, so we set it explicitly to None.
+        session, endpoint_url = self._get_credentials(region_name=None)
         s3_resource = session.resource(
             "s3",
             endpoint_url=endpoint_url,
@@ -364,9 +444,7 @@ class S3Hook(AwsBaseHook):
         Reads a key from S3
 
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which the file is stored
-        :type bucket_name: str
         :return: the content of the key
         :rtype: str
         """
@@ -388,17 +466,11 @@ class S3Hook(AwsBaseHook):
         Reads a key with S3 Select.
 
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which the file is stored
-        :type bucket_name: str
         :param expression: S3 Select expression
-        :type expression: str
         :param expression_type: S3 Select expression type
-        :type expression_type: str
         :param input_serialization: S3 Select input data serialization format
-        :type input_serialization: dict
         :param output_serialization: S3 Select output data serialization format
-        :type output_serialization: dict
         :return: retrieved subset of original data by S3 Select
         :rtype: str
 
@@ -436,11 +508,8 @@ class S3Hook(AwsBaseHook):
         Checks that a key matching a wildcard expression exists in a bucket
 
         :param wildcard_key: the path to the key
-        :type wildcard_key: str
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :param delimiter: the delimiter marks key hierarchy
-        :type delimiter: str
         :return: True if a key exists and False if not.
         :rtype: bool
         """
@@ -458,11 +527,8 @@ class S3Hook(AwsBaseHook):
         Returns a boto3.s3.Object object matching the wildcard expression
 
         :param wildcard_key: the path to the key
-        :type wildcard_key: str
         :param bucket_name: the name of the bucket
-        :type bucket_name: str
         :param delimiter: the delimiter marks key hierarchy
-        :type delimiter: str
         :return: the key object from the bucket or None if none has been found.
         :rtype: boto3.s3.Object
         """
@@ -489,23 +555,16 @@ class S3Hook(AwsBaseHook):
         Loads a local file to S3
 
         :param filename: path to the file to load.
-        :type filename: Union[Path, str]
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which to store the file
-        :type bucket_name: str
         :param replace: A flag to decide whether or not to overwrite the key
             if it already exists. If replace is False and the key exists, an
             error will be raised.
-        :type replace: bool
         :param encrypt: If True, the file will be encrypted on the server-side
             by S3 and will be stored in an encrypted form while at rest in S3.
-        :type encrypt: bool
         :param gzip: If True, the file will be compressed locally
-        :type gzip: bool
         :param acl_policy: String specifying the canned ACL policy for the file being
             uploaded to the S3 bucket.
-        :type acl_policy: str
         """
         filename = str(filename)
         if not replace and self.check_for_key(key, bucket_name):
@@ -546,24 +605,16 @@ class S3Hook(AwsBaseHook):
         boto infrastructure to ship a file to s3.
 
         :param string_data: str to set as content for the key.
-        :type string_data: str
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which to store the file
-        :type bucket_name: str
         :param replace: A flag to decide whether or not to overwrite the key
             if it already exists
-        :type replace: bool
         :param encrypt: If True, the file will be encrypted on the server-side
             by S3 and will be stored in an encrypted form while at rest in S3.
-        :type encrypt: bool
         :param encoding: The string to byte encoding
-        :type encoding: str
         :param acl_policy: The string to specify the canned ACL policy for the
             object to be uploaded
-        :type acl_policy: str
         :param compression: Type of compression to use, currently only gzip is supported.
-        :type compression: str
         """
         encoding = encoding or 'utf-8'
 
@@ -602,20 +653,14 @@ class S3Hook(AwsBaseHook):
         boto infrastructure to ship a file to s3.
 
         :param bytes_data: bytes to set as content for the key.
-        :type bytes_data: bytes
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which to store the file
-        :type bucket_name: str
         :param replace: A flag to decide whether or not to overwrite the key
             if it already exists
-        :type replace: bool
         :param encrypt: If True, the file will be encrypted on the server-side
             by S3 and will be stored in an encrypted form while at rest in S3.
-        :type encrypt: bool
         :param acl_policy: The string to specify the canned ACL policy for the
             object to be uploaded
-        :type acl_policy: str
         """
         file_obj = io.BytesIO(bytes_data)
         self._upload_file_obj(file_obj, key, bucket_name, replace, encrypt, acl_policy)
@@ -636,20 +681,14 @@ class S3Hook(AwsBaseHook):
         Loads a file object to S3
 
         :param file_obj: The file-like object to set as the content for the S3 key.
-        :type file_obj: file-like object
         :param key: S3 key that will point to the file
-        :type key: str
         :param bucket_name: Name of the bucket in which to store the file
-        :type bucket_name: str
         :param replace: A flag that indicates whether to overwrite the key
             if it already exists.
-        :type replace: bool
         :param encrypt: If True, S3 encrypts the file on the server,
             and the file is stored in encrypted form at rest in S3.
-        :type encrypt: bool
         :param acl_policy: The string to specify the canned ACL policy for the
             object to be uploaded
-        :type acl_policy: str
         """
         self._upload_file_obj(file_obj, key, bucket_name, replace, encrypt, acl_policy)
 
@@ -700,25 +739,19 @@ class S3Hook(AwsBaseHook):
             It can be either full s3:// style url or relative path from root level.
 
             When it's specified as a full s3:// url, please omit source_bucket_name.
-        :type source_bucket_key: str
         :param dest_bucket_key: The key of the object to copy to.
 
             The convention to specify `dest_bucket_key` is the same
             as `source_bucket_key`.
-        :type dest_bucket_key: str
         :param source_bucket_name: Name of the S3 bucket where the source object is in.
 
             It should be omitted when `source_bucket_key` is provided as a full s3:// url.
-        :type source_bucket_name: str
         :param dest_bucket_name: Name of the S3 bucket to where the object is copied.
 
             It should be omitted when `dest_bucket_key` is provided as a full s3:// url.
-        :type dest_bucket_name: str
         :param source_version_id: Version ID of the source object (OPTIONAL)
-        :type source_version_id: str
         :param acl_policy: The string to specify the canned ACL policy for the
             object to be copied which is private by default.
-        :type acl_policy: str
         """
         acl_policy = acl_policy or 'private'
 
@@ -756,9 +789,7 @@ class S3Hook(AwsBaseHook):
         To delete s3 bucket, delete all s3 bucket objects and then delete the bucket.
 
         :param bucket_name: Bucket name
-        :type bucket_name: str
         :param force_delete: Enable this to delete bucket even if not empty
-        :type force_delete: bool
         :return: None
         :rtype: None
         """
@@ -773,7 +804,6 @@ class S3Hook(AwsBaseHook):
         Delete keys from the bucket.
 
         :param bucket: Name of the bucket in which you are going to delete object(s)
-        :type bucket: str
         :param keys: The key(s) to delete from S3 bucket.
 
             When ``keys`` is a string, it's supposed to be the key name of
@@ -781,7 +811,6 @@ class S3Hook(AwsBaseHook):
 
             When ``keys`` is a list, it's supposed to be the list of the
             keys to delete.
-        :type keys: str or list
         """
         if isinstance(keys, str):
             keys = [keys]
@@ -808,12 +837,9 @@ class S3Hook(AwsBaseHook):
         Downloads a file from the S3 location to the local file system.
 
         :param key: The key path in S3.
-        :type key: str
         :param bucket_name: The specific bucket to use.
-        :type bucket_name: Optional[str]
         :param local_path: The local path to the downloaded file. If no path is provided it will use the
             system's temporary directory.
-        :type local_path: Optional[str]
         :return: the file name.
         :rtype: str
         """
@@ -845,15 +871,11 @@ class S3Hook(AwsBaseHook):
         Generate a presigned url given a client, its method, and arguments
 
         :param client_method: The client method to presign for.
-        :type client_method: str
         :param params: The parameters normally passed to ClientMethod.
-        :type params: dict
         :param expires_in: The number of seconds the presigned url is valid for.
             By default it expires in an hour (3600 seconds).
-        :type expires_in: int
         :param http_method: The http method to use on the generated url.
             By default, the http method is whatever is used in the method's model.
-        :type http_method: str
         :return: The presigned url.
         :rtype: str
         """
@@ -873,7 +895,6 @@ class S3Hook(AwsBaseHook):
         Gets a List of tags from a bucket.
 
         :param bucket_name: The name of the bucket.
-        :type bucket_name: str
         :return: A List containing the key/value pairs for the tags
         :rtype: Optional[List[Dict[str, str]]]
         """
@@ -898,13 +919,9 @@ class S3Hook(AwsBaseHook):
         Overwrites the existing TagSet with provided tags.  Must provide either a TagSet or a key/value pair.
 
         :param tag_set: A List containing the key/value pairs for the tags.
-        :type tag_set: List[Dict[str, str]]
         :param key: The Key for the new TagSet entry.
-        :type key: str
         :param value: The Value for the new TagSet entry.
-        :type value: str
         :param bucket_name: The name of the bucket.
-        :type bucket_name: str
         :return: None
         :rtype: None
         """
@@ -931,7 +948,6 @@ class S3Hook(AwsBaseHook):
         Deletes all tags from a bucket.
 
         :param bucket_name: The name of the bucket.
-        :type bucket_name: str
         :return: None
         :rtype: None
         """

@@ -20,13 +20,16 @@
 
 from collections import OrderedDict
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import unicodecsv as csv
 
 from airflow.models import BaseOperator
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook
 from airflow.providers.vertica.hooks.vertica import VerticaHook
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
 
 
 class VerticaToHiveOperator(BaseOperator):
@@ -45,28 +48,21 @@ class VerticaToHiveOperator(BaseOperator):
     final destination using a ``HiveOperator``.
 
     :param sql: SQL query to execute against the Vertica database. (templated)
-    :type sql: str
     :param hive_table: target Hive table, use dot notation to target a
         specific database. (templated)
-    :type hive_table: str
     :param create: whether to create the table if it doesn't exist
-    :type create: bool
     :param recreate: whether to drop and recreate the table at every execution
-    :type recreate: bool
     :param partition: target partition as a dict of partition columns
         and values. (templated)
-    :type partition: dict
     :param delimiter: field delimiter in the file
-    :type delimiter: str
     :param vertica_conn_id: source Vertica connection
-    :type vertica_conn_id: str
     :param hive_cli_conn_id: Reference to the
         :ref:`Hive CLI connection id <howto/connection:hive_cli>`.
-    :type hive_cli_conn_id: str
     """
 
-    template_fields = ('sql', 'partition', 'hive_table')
-    template_ext = ('.sql',)
+    template_fields: Sequence[str] = ('sql', 'partition', 'hive_table')
+    template_ext: Sequence[str] = ('.sql',)
+    template_fields_renderers = {'sql': 'sql'}
     ui_color = '#b4e0ff'
 
     def __init__(
@@ -110,7 +106,7 @@ class VerticaToHiveOperator(BaseOperator):
         }
         return type_map.get(vertica_type, 'STRING')
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hive = HiveCliHook(hive_cli_conn_id=self.hive_cli_conn_id)
         vertica = VerticaHook(vertica_conn_id=self.vertica_conn_id)
 

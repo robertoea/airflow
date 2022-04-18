@@ -17,14 +17,13 @@
 # under the License.
 import logging
 import re
-import sys
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 import pytest
 
-import airflow
-from airflow.providers_manager import ProviderInfo, ProvidersManager
+from airflow.exceptions import AirflowOptionalProviderFeatureException
+from airflow.providers_manager import HookClassProvider, ProviderInfo, ProvidersManager
 
 
 class TestProviderManager(unittest.TestCase):
@@ -38,8 +37,8 @@ class TestProviderManager(unittest.TestCase):
             provider_list = list(provider_manager.providers.keys())
             # No need to sort the list - it should be sorted alphabetically !
             for provider in provider_list:
-                package_name = provider_manager.providers[provider][1]['package-name']
-                version = provider_manager.providers[provider][0]
+                package_name = provider_manager.providers[provider].data['package-name']
+                version = provider_manager.providers[provider].version
                 assert re.search(r'[0-9]*\.[0-9]*\.[0-9]*.*', version)
                 assert package_name == provider
             # just a coherence check - no exact number as otherwise we would have to update
@@ -52,7 +51,8 @@ class TestProviderManager(unittest.TestCase):
             providers_manager = ProvidersManager()
             providers_manager._provider_dict['test-package'] = ProviderInfo(
                 version='0.0.1',
-                provider_info={'hook-class-names': ['airflow.providers.sftp.hooks.sftp.SFTPHook']},
+                data={'hook-class-names': ['airflow.providers.sftp.hooks.sftp.SFTPHook']},
+                package_or_source='package',
             )
             providers_manager._discover_hooks()
         assert warning_records
@@ -62,7 +62,7 @@ class TestProviderManager(unittest.TestCase):
             providers_manager = ProvidersManager()
             providers_manager._provider_dict['apache-airflow-providers-sftp'] = ProviderInfo(
                 version='0.0.1',
-                provider_info={
+                data={
                     'hook-class-names': ['airflow.providers.sftp.hooks.sftp.SFTPHook'],
                     'connection-types': [
                         {
@@ -71,6 +71,7 @@ class TestProviderManager(unittest.TestCase):
                         }
                     ],
                 },
+                package_or_source='package',
             )
             providers_manager._discover_hooks()
         assert [] == [w.message for w in warning_records.list if "hook-class-names" in str(w.message)]
@@ -80,7 +81,7 @@ class TestProviderManager(unittest.TestCase):
             providers_manager = ProvidersManager()
             providers_manager._provider_dict['apache-airflow-providers-sftp'] = ProviderInfo(
                 version='0.0.1',
-                provider_info={
+                data={
                     'hook-class-names': ['airflow.providers.sftp.hooks.sftp.SFTPHook'],
                     'connection-types': [
                         {
@@ -89,6 +90,7 @@ class TestProviderManager(unittest.TestCase):
                         }
                     ],
                 },
+                package_or_source='package',
             )
             providers_manager._discover_hooks()
             _ = providers_manager._hooks_lazy_dict['wrong-connection-type']
@@ -101,7 +103,7 @@ class TestProviderManager(unittest.TestCase):
             providers_manager = ProvidersManager()
             providers_manager._provider_dict['apache-airflow-providers-sftp'] = ProviderInfo(
                 version='0.0.1',
-                provider_info={
+                data={
                     'hook-class-names': ['airflow.providers.sftp.hooks.sftp.SFTPHook'],
                     'connection-types': [
                         {
@@ -110,19 +112,14 @@ class TestProviderManager(unittest.TestCase):
                         }
                     ],
                 },
+                package_or_source='package',
             )
             providers_manager._discover_hooks()
             _ = providers_manager._hooks_lazy_dict['sftp']
         assert not self._caplog.records
         assert "sftp" in providers_manager.hooks
 
-    @patch('airflow.providers_manager.importlib.import_module')
-    def test_hooks(self, mock_import_module):
-        # importlib.resources relies on importing the containing module to read
-        # its content. The provider manager needs to read two validation schemas
-        # 'provider_info.schema.json' and 'customized_form_field_behaviours.schema.json'.
-        mock_import_module.side_effect = [airflow, airflow]
-
+    def test_hooks(self):
         with pytest.warns(expected_warning=None) as warning_records:
             with self._caplog.at_level(logging.WARNING):
                 provider_manager = ProvidersManager()
@@ -130,16 +127,6 @@ class TestProviderManager(unittest.TestCase):
                 assert len(connections_list) > 60
         assert [] == [w.message for w in warning_records.list if "hook-class-names" in str(w.message)]
         assert len(self._caplog.records) == 0
-
-        # The stdlib importlib.resources implementation in 3.9 does not rely on
-        # importlib.import_module, so the function should not be called. The
-        # implementation for 3.10+ and the backport we use for up to 3.8 uses it
-        # to import the top-level 'airflow' for the two schema files. Also see
-        # comment on mocking at the beginning of the function.
-        if sys.version_info[:2] == (3, 9):
-            assert mock_import_module.mock_calls == []
-        else:
-            assert mock_import_module.mock_calls == [call("airflow"), call("airflow")]
 
     def test_hook_values(self):
         with pytest.warns(expected_warning=None) as warning_records:
@@ -179,3 +166,32 @@ class TestProviderManager(unittest.TestCase):
         provider_manager = ProvidersManager()
         auth_backend_module_names = list(provider_manager.auth_backend_module_names)
         assert len(auth_backend_module_names) > 0
+
+    @patch("airflow.providers_manager.import_string")
+    def test_optional_feature_no_warning(self, mock_importlib_import_string):
+        with self._caplog.at_level(logging.WARNING):
+            mock_importlib_import_string.side_effect = AirflowOptionalProviderFeatureException()
+            providers_manager = ProvidersManager()
+            providers_manager._hook_provider_dict["test_connection"] = HookClassProvider(
+                package_name="test_package", hook_class_name="HookClass"
+            )
+            providers_manager._import_hook(
+                hook_class_name=None, provider_info=None, package_name=None, connection_type="test_connection"
+            )
+            assert [] == self._caplog.messages
+
+    @patch("airflow.providers_manager.import_string")
+    def test_optional_feature_debug(self, mock_importlib_import_string):
+        with self._caplog.at_level(logging.DEBUG):
+            mock_importlib_import_string.side_effect = AirflowOptionalProviderFeatureException()
+            providers_manager = ProvidersManager()
+            providers_manager._hook_provider_dict["test_connection"] = HookClassProvider(
+                package_name="test_package", hook_class_name="HookClass"
+            )
+            providers_manager._import_hook(
+                hook_class_name=None, provider_info=None, package_name=None, connection_type="test_connection"
+            )
+            assert [
+                "Optional feature disabled on exception when importing 'HookClass' from "
+                "'test_package' package"
+            ] == self._caplog.messages

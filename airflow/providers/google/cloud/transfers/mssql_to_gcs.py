@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """MsSQL to GCS operator."""
-
+import datetime
 import decimal
 from typing import Dict
 
@@ -29,7 +29,6 @@ class MSSQLToGCSOperator(BaseSQLToGCSOperator):
     in JSON or CSV format.
 
     :param mssql_conn_id: Reference to a specific MSSQL hook.
-    :type mssql_conn_id: str
 
     **Example**:
         The following operator will export data from the Customers table
@@ -85,7 +84,10 @@ class MSSQLToGCSOperator(BaseSQLToGCSOperator):
         """
         Takes a value from MSSQL, and converts it to a value that's safe for
         JSON/Google Cloud Storage/BigQuery.
+        Datetime, Date and Time are converted to ISO formatted strings.
         """
         if isinstance(value, decimal.Decimal):
             return float(value)
+        if isinstance(value, (datetime.date, datetime.time)):
+            return value.isoformat()
         return value

@@ -166,6 +166,8 @@ Those are extras that add dependencies needed for integration with external serv
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | datadog             | ``pip install 'apache-airflow[datadog]'``           | Datadog hooks and sensors                           |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| dbt.cloud           | ``pip install 'apache-airflow[dbt.cloud]'``         | dbt Cloud hooks and operators                       |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | dingding            | ``pip install 'apache-airflow[dingding]'``          | Dingding hooks and sensors                          |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | discord             | ``pip install 'apache-airflow[discord]'``           | Discord hooks and sensors                           |
@@ -222,6 +224,8 @@ Those are extras that add dependencies needed for integration with other softwar
 +---------------------+-----------------------------------------------------+-------------------------------------------+
 | exasol              | ``pip install 'apache-airflow[exasol]'``            | Exasol hooks and operators                |
 +---------------------+-----------------------------------------------------+-------------------------------------------+
+| github              | ``pip install 'apache-airflow[github]'``            | Github operators and hook                 |
++---------------------+-----------------------------------------------------+-------------------------------------------+
 | influxdb            | ``pip install 'apache-airflow[influxdb]'``          | Influxdb operators and hook               |
 +---------------------+-----------------------------------------------------+-------------------------------------------+
 | jenkins             | ``pip install 'apache-airflow[jenkins]'``           | Jenkins hooks and operators               |
@@ -251,6 +255,8 @@ Those are extras that add dependencies needed for integration with other softwar
 | singularity         | ``pip install 'apache-airflow[singularity]'``       | Singularity container operator            |
 +---------------------+-----------------------------------------------------+-------------------------------------------+
 | trino               | ``pip install 'apache-airflow[trino]'``             | All Trino related operators & hooks       |
++---------------------+-----------------------------------------------------+-------------------------------------------+
+| arangodb            | ``pip install 'apache-airflow[arangodb]'``          | ArangoDB operators, sensors and hook      |
 +---------------------+-----------------------------------------------------+-------------------------------------------+
 
 

@@ -23,7 +23,11 @@ from datetime import datetime
 
 from airflow import DAG
 from airflow.decorators import task
-from airflow.operators.dummy import DummyOperator
+
+try:
+    from airflow.operators.empty import EmptyOperator
+except ModuleNotFoundError:
+    from airflow.operators.dummy import DummyOperator as EmptyOperator  # type: ignore
 from airflow.operators.python import BranchPythonOperator
 from airflow.providers.qubole.operators.qubole import QuboleOperator
 from airflow.providers.qubole.sensors.qubole import QuboleFileSensor, QubolePartitionSensor
@@ -56,11 +60,8 @@ with DAG(
         Compares the results of two QuboleOperator tasks.
 
         :param hive_show_table: The "hive_show_table" task.
-        :type hive_show_table: QuboleOperator
         :param hive_s3_location: The "hive_s3_location" task.
-        :type hive_s3_location: QuboleOperator
         :param ti: The TaskInstance object.
-        :type ti: airflow.models.TaskInstance
         :return: True if the files are the same, False otherwise.
         :rtype: bool
         """
@@ -103,7 +104,7 @@ with DAG(
 
     [hive_show_table, hive_s3_location] >> compare_result(hive_s3_location, hive_show_table) >> branching
 
-    join = DummyOperator(task_id='join', trigger_rule=TriggerRule.ONE_SUCCESS)
+    join = EmptyOperator(task_id='join', trigger_rule=TriggerRule.ONE_SUCCESS)
 
     # [START howto_operator_qubole_run_hadoop_jar]
     hadoop_jar_cmd = QuboleOperator(

@@ -46,14 +46,10 @@ readonly SCRIPTS_CI_DIR
 . "${LIBRARIES_DIR}"/_md5sum.sh
 # shellcheck source=scripts/ci/libraries/_parameters.sh
 . "${LIBRARIES_DIR}"/_parameters.sh
-# shellcheck source=scripts/ci/libraries/_permissions.sh
-. "${LIBRARIES_DIR}"/_permissions.sh
 # shellcheck source=scripts/ci/libraries/_push_pull_remove_images.sh
 . "${LIBRARIES_DIR}"/_push_pull_remove_images.sh
 # shellcheck source=scripts/ci/libraries/_runs.sh
 . "${LIBRARIES_DIR}"/_runs.sh
-# shellcheck source=scripts/ci/libraries/_spinner.sh
-. "${LIBRARIES_DIR}"/_spinner.sh
 # shellcheck source=scripts/ci/libraries/_start_end.sh
 . "${LIBRARIES_DIR}"/_start_end.sh
 # shellcheck source=scripts/ci/libraries/_testing.sh

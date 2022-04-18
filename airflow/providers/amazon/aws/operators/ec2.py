@@ -17,10 +17,13 @@
 # under the License.
 #
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.ec2 import EC2Hook
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
 
 
 class EC2StartInstanceOperator(BaseOperator):
@@ -28,17 +31,13 @@ class EC2StartInstanceOperator(BaseOperator):
     Start AWS EC2 instance using boto3.
 
     :param instance_id: id of the AWS EC2 instance
-    :type instance_id: str
     :param aws_conn_id: aws connection to use
-    :type aws_conn_id: str
     :param region_name: (optional) aws region name associated with the client
-    :type region_name: Optional[str]
     :param check_interval: time in seconds that the job should wait in
         between each instance state checks until operation is completed
-    :type check_interval: float
     """
 
-    template_fields = ("instance_id", "region_name")
+    template_fields: Sequence[str] = ("instance_id", "region_name")
     ui_color = "#eeaa11"
     ui_fgcolor = "#ffffff"
 
@@ -57,7 +56,7 @@ class EC2StartInstanceOperator(BaseOperator):
         self.region_name = region_name
         self.check_interval = check_interval
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         ec2_hook = EC2Hook(aws_conn_id=self.aws_conn_id, region_name=self.region_name)
         self.log.info("Starting EC2 instance %s", self.instance_id)
         instance = ec2_hook.get_instance(instance_id=self.instance_id)
@@ -74,17 +73,13 @@ class EC2StopInstanceOperator(BaseOperator):
     Stop AWS EC2 instance using boto3.
 
     :param instance_id: id of the AWS EC2 instance
-    :type instance_id: str
     :param aws_conn_id: aws connection to use
-    :type aws_conn_id: str
     :param region_name: (optional) aws region name associated with the client
-    :type region_name: Optional[str]
     :param check_interval: time in seconds that the job should wait in
         between each instance state checks until operation is completed
-    :type check_interval: float
     """
 
-    template_fields = ("instance_id", "region_name")
+    template_fields: Sequence[str] = ("instance_id", "region_name")
     ui_color = "#eeaa11"
     ui_fgcolor = "#ffffff"
 
@@ -103,7 +98,7 @@ class EC2StopInstanceOperator(BaseOperator):
         self.region_name = region_name
         self.check_interval = check_interval
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         ec2_hook = EC2Hook(aws_conn_id=self.aws_conn_id, region_name=self.region_name)
         self.log.info("Stopping EC2 instance %s", self.instance_id)
         instance = ec2_hook.get_instance(instance_id=self.instance_id)

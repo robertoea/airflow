@@ -20,8 +20,8 @@
 import sys
 from typing import Any, Dict, Optional
 
-from asana import Client
-from asana.error import NotFoundError
+from asana import Client  # type: ignore[attr-defined]
+from asana.error import NotFoundError  # type: ignore[attr-defined]
 
 if sys.version_info >= (3, 8):
     from functools import cached_property
@@ -62,7 +62,7 @@ class AsanaHook(BaseHook):
         }
 
     @staticmethod
-    def get_ui_field_behaviour() -> Dict:
+    def get_ui_field_behaviour() -> Dict[str, Any]:
         """Returns custom field behaviour"""
         return {
             "hidden_fields": ["port", "host", "login", "schema"],

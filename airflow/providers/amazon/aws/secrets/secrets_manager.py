@@ -19,11 +19,15 @@
 
 import ast
 import json
+import re
 import sys
+import warnings
 from typing import Optional
 from urllib.parse import urlencode
 
 import boto3
+
+from airflow.version import version as airflow_version
 
 if sys.version_info >= (3, 8):
     from functools import cached_property
@@ -32,6 +36,11 @@ else:
 
 from airflow.secrets import BaseSecretsBackend
 from airflow.utils.log.logging_mixin import LoggingMixin
+
+
+def _parse_version(val):
+    val = re.sub(r'(\d+\.\d+\.\d+).*', lambda x: x.group(1), val)
+    return tuple(int(x) for x in val.split('.'))
 
 
 class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
@@ -80,29 +89,22 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
     :param connections_prefix: Specifies the prefix of the secret to read to get Connections.
         If set to None (null value in the configuration), requests for connections will not be
         sent to AWS Secrets Manager. If you don't want a connections_prefix, set it as an empty string
-    :type connections_prefix: str
     :param variables_prefix: Specifies the prefix of the secret to read to get Variables.
         If set to None (null value in the configuration), requests for variables will not be sent to
         AWS Secrets Manager. If you don't want a variables_prefix, set it as an empty string
-    :type variables_prefix: str
     :param config_prefix: Specifies the prefix of the secret to read to get Configurations.
         If set to None (null value in the configuration), requests for configurations will not be sent to
         AWS Secrets Manager. If you don't want a config_prefix, set it as an empty string
-    :type config_prefix: str
     :param profile_name: The name of a profile to use. If not given, then the default profile is used.
-    :type profile_name: str
     :param sep: separator used to concatenate secret_prefix and secret_id. Default: "/"
-    :type sep: str
     :param full_url_mode: if True, the secrets must be stored as one conn URI in just one field per secret.
         If False (set it as false in backend_kwargs), you can store the secret using different
         fields (password, user...).
-    :type full_url_mode: bool
     :param extra_conn_words: for using just when you set full_url_mode as false and store
         the secrets in different fields of secrets manager. You can add more words for each connection
         part beyond the default ones. The extra words to be searched should be passed as a dict of lists,
         each list corresponding to a connection part. The optional keys of the dict must be: user,
         password, host, schema, conn_type.
-    :type extra_conn_words: dict
     """
 
     def __init__(
@@ -180,12 +182,11 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
 
         return connection
 
-    def get_conn_uri(self, conn_id: str):
+    def get_conn_value(self, conn_id: str):
         """
-        Get Connection Value
+        Get serialized representation of Connection
 
         :param conn_id: connection id
-        :type conn_id: str
         """
         if self.connections_prefix is None:
             return None
@@ -206,6 +207,24 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
                 connection = self.get_uri_from_secret(secret)
 
             return connection
+
+    def get_conn_uri(self, conn_id: str) -> Optional[str]:
+        """
+        Return URI representation of Connection conn_id.
+
+        As of Airflow version 2.3.0 this method is deprecated.
+
+        :param conn_id: the connection id
+        :return: deserialized Connection
+        """
+        if _parse_version(airflow_version) >= (2, 3):
+            warnings.warn(
+                f"Method `{self.__class__.__name__}.get_conn_uri` is deprecated and will be removed "
+                "in a future release.  Please use method `get_conn_value` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self.get_conn_value(conn_id)
 
     def get_variable(self, key: str) -> Optional[str]:
         """
@@ -233,9 +252,7 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
         """
         Get secret value from Secrets Manager
         :param path_prefix: Prefix for the Path to get Secret
-        :type path_prefix: str
         :param secret_id: Secret Key
-        :type secret_id: str
         """
         if path_prefix:
             secrets_path = self.build_path(path_prefix, secret_id, self.sep)

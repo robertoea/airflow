@@ -30,7 +30,6 @@ class YandexCloudBaseHook(BaseHook):
     A base hook for Yandex.Cloud related tasks.
 
     :param yandex_conn_id: The connection ID to use when fetching connection info.
-    :type yandex_conn_id: str
     """
 
     conn_name_attr = 'yandex_conn_id'
@@ -88,14 +87,15 @@ class YandexCloudBaseHook(BaseHook):
 
         try:
             manager = ProvidersManager()
-            provider_name = manager.hooks[cls.conn_type].package_name
+            provider_name = manager.hooks[cls.conn_type].package_name  # type: ignore[union-attr]
             provider = manager.providers[provider_name]
             return f'apache-airflow/{airflow.__version__} {provider_name}/{provider.version}'
         except KeyError:
             warnings.warn(f"Hook '{cls.hook_name}' info is not initialized in airflow.ProviderManager")
+            return None
 
     @staticmethod
-    def get_ui_field_behaviour() -> Dict:
+    def get_ui_field_behaviour() -> Dict[str, Any]:
         """Returns custom field behaviour"""
         return {
             "hidden_fields": ['host', 'schema', 'login', 'password', 'port', 'extra'],

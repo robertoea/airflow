@@ -42,8 +42,8 @@ from pathlib import Path
 from shutil import copyfile
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple, Type, Union
 
-import click
 import jsonschema
+import rich_click as click
 from github import Github, Issue, PullRequest, UnknownObjectException
 from packaging.version import Version
 from rich.console import Console
@@ -52,7 +52,7 @@ from rich.syntax import Syntax
 
 from airflow.utils.yaml import safe_load
 
-ALL_PYTHON_VERSIONS = ["3.6", "3.7", "3.8", "3.9"]
+ALL_PYTHON_VERSIONS = ["3.7", "3.8", "3.9", "3.10"]
 
 INITIAL_CHANGELOG_CONTENT = """
 
@@ -87,23 +87,23 @@ Initial version of the provider.
 HTTPS_REMOTE = "apache-https-for-providers"
 HEAD_OF_HTTPS_REMOTE = f"{HTTPS_REMOTE}/main"
 
-MY_DIR_PATH = os.path.dirname(__file__)
-SOURCE_DIR_PATH = os.path.abspath(os.path.join(MY_DIR_PATH, os.pardir, os.pardir))
-AIRFLOW_PATH = os.path.join(SOURCE_DIR_PATH, "airflow")
-PROVIDERS_PATH = os.path.join(AIRFLOW_PATH, "providers")
-DOCUMENTATION_PATH = os.path.join(SOURCE_DIR_PATH, "docs")
-TARGET_PROVIDER_PACKAGES_PATH = os.path.join(SOURCE_DIR_PATH, "provider_packages")
-GENERATED_AIRFLOW_PATH = os.path.join(TARGET_PROVIDER_PACKAGES_PATH, "airflow")
-GENERATED_PROVIDERS_PATH = os.path.join(GENERATED_AIRFLOW_PATH, "providers")
+MY_DIR_PATH = Path(__file__).parent
+SOURCE_DIR_PATH = MY_DIR_PATH.parent.parent
+AIRFLOW_PATH = SOURCE_DIR_PATH / "airflow"
+DIST_PATH = SOURCE_DIR_PATH / "dist"
+PROVIDERS_PATH = AIRFLOW_PATH / "providers"
+DOCUMENTATION_PATH = SOURCE_DIR_PATH / "docs"
+TARGET_PROVIDER_PACKAGES_PATH = SOURCE_DIR_PATH / "provider_packages"
+GENERATED_AIRFLOW_PATH = TARGET_PROVIDER_PACKAGES_PATH / "airflow"
+GENERATED_PROVIDERS_PATH = GENERATED_AIRFLOW_PATH / "providers"
 
-PROVIDER_RUNTIME_DATA_SCHEMA_PATH = os.path.join(SOURCE_DIR_PATH, "airflow", "provider_info.schema.json")
+PROVIDER_RUNTIME_DATA_SCHEMA_PATH = SOURCE_DIR_PATH / "airflow" / "provider_info.schema.json"
 
-sys.path.insert(0, SOURCE_DIR_PATH)
+sys.path.insert(0, str(SOURCE_DIR_PATH))
 
 # those imports need to come after the above sys.path.insert to make sure that Airflow
 # sources are importable without having to add the airflow sources to the PYTHONPATH before
 # running the script
-import tests.deprecated_classes  # noqa # isort:skip
 from dev.import_all_classes import import_all_classes  # noqa # isort:skip
 from setup import PROVIDERS_REQUIREMENTS, PREINSTALLED_PROVIDERS  # noqa # isort:skip
 
@@ -121,6 +121,13 @@ console = Console(width=400, color_system="standard")
 def cli():
     ...
 
+
+option_skip_tag_check = click.option(
+    "--skip-tag-check/--no-skip-tag-check",
+    default=False,
+    is_flag=True,
+    help="Skip checking if the tag already exists in the remote repository",
+)
 
 option_git_update = click.option(
     '--git-update/--no-git-update',
@@ -344,7 +351,7 @@ def get_long_description(provider_package_id: str) -> str:
     return long_description
 
 
-def get_install_requirements(provider_package_id: str, version_suffix: str) -> List[str]:
+def get_install_requirements(provider_package_id: str, version_suffix: str) -> str:
     """
     Returns install requirements for the package.
 
@@ -373,15 +380,19 @@ def get_install_requirements(provider_package_id: str, version_suffix: str) -> L
             install_requires.extend(additional_dependencies)
 
     install_requires.extend(dependencies)
-    return install_requires
+    prefix = "\n    "
+    return prefix + prefix.join(install_requires)
 
 
-def get_setup_requirements() -> List[str]:
+def get_setup_requirements() -> str:
     """
     Returns setup requirements (common for all package for now).
     :return: setup requirements
     """
-    return ['setuptools', 'wheel']
+    return """
+    setuptools
+    wheel
+"""
 
 
 def get_package_extras(provider_package_id: str) -> Dict[str, List[str]]:
@@ -508,7 +519,7 @@ def find_all_entities(
     :param ancestor_match: type of the object the method looks for
     :param expected_class_name_pattern: regexp of class name pattern to expect
     :param unexpected_class_name_patterns: set of regexp of class name pattern that are not expected
-    :param exclude_class_type: exclude class of this type (Sensor are also Operators so
+    :param exclude_class_type: exclude class of this type (Sensor are also Operators, so
            they should be excluded from the list)
     :param false_positive_class_names: set of class names that are wrongly recognised as badly named
     """
@@ -554,7 +565,7 @@ def find_all_entities(
 
 def convert_classes_to_table(entity_type: EntityType, entities: List[str], full_package_name: str) -> str:
     """
-    Converts new entities tp a markdown table.
+    Converts new entities to a Markdown table.
 
     :param entity_type: entity type to convert to markup
     :param entities: list of  entities
@@ -575,7 +586,7 @@ def get_details_about_classes(
     full_package_name: str,
 ) -> EntityTypeSummary:
     """
-    Get details about entities..
+    Get details about entities.
 
     :param entity_type: type of entity (Operators, Hooks etc.)
     :param entities: set of entities found
@@ -620,7 +631,7 @@ def convert_class_name_to_url(base_url: str, class_name) -> str:
 
 def get_class_code_link(base_package: str, class_name: str, git_tag: str) -> str:
     """
-    Provides markdown link for the class passed as parameter.
+    Provides a Markdown link for the class passed as parameter.
 
     :param base_package: base package to strip from most names
     :param class_name: name of the class
@@ -735,7 +746,7 @@ def render_template(
     keep_trailing_newline: bool = False,
 ) -> str:
     """
-    Renders template based on it's name. Reads the template from <name>_TEMPLATE.md.jinja2 in current dir.
+    Renders template based on its name. Reads the template from <name>_TEMPLATE.md.jinja2 in current dir.
     :param template_name: name of the template to use
     :param context: Jinja2 context
     :param extension: Target file extension
@@ -794,7 +805,7 @@ def convert_git_changes_to_table(
     version: str, changes: str, base_url: str, markdown: bool = True
 ) -> Tuple[str, List[Change]]:
     """
-    Converts list of changes from it's string form to markdown/RST table and array of change information
+    Converts list of changes from its string form to markdown/RST table and array of change information
 
     The changes are in the form of multiple lines where each line consists of:
     FULL_COMMIT_HASH SHORT_COMMIT_HASH COMMIT_DATE COMMIT_SUBJECT
@@ -804,7 +815,7 @@ def convert_git_changes_to_table(
     :param version: Version from which the changes are
     :param changes: list of changes in a form of multiple-line string
     :param base_url: base url for the commit URL
-    :param markdown: if True, markdown format is used else rst
+    :param markdown: if True, Markdown format is used else rst
     :return: formatted table + list of changes (starting from the latest)
     """
     from tabulate import tabulate
@@ -842,9 +853,9 @@ def convert_git_changes_to_table(
 
 def convert_pip_requirements_to_table(requirements: Iterable[str], markdown: bool = True) -> str:
     """
-    Converts PIP requirement list to a markdown table.
+    Converts PIP requirement list to a Markdown table.
     :param requirements: requirements list
-    :param markdown: if True, markdown format is used else rst
+    :param markdown: if True, Markdown format is used else rst
     :return: formatted table
     """
     from tabulate import tabulate
@@ -869,9 +880,9 @@ def convert_cross_package_dependencies_to_table(
     markdown: bool = True,
 ) -> str:
     """
-    Converts cross-package dependencies to a markdown table
+    Converts cross-package dependencies to a Markdown table
     :param cross_package_dependencies: list of cross-package dependencies
-    :param markdown: if True, markdown format is used else rst
+    :param markdown: if True, Markdown format is used else rst
     :return: formatted table
     """
     from tabulate import tabulate
@@ -1014,11 +1025,11 @@ def make_sure_remote_apache_exists_and_fetch(git_update: bool, verbose: bool):
     Make sure that apache remote exist in git. We need to take a log from the apache
     repository - not locally.
 
-    Also the local repo might be shallow so we need to unshallow it.
+    Also, the local repo might be shallow, so we need to un-shallow it.
 
     This will:
     * check if the remote exists and add if it does not
-    * check if the local repo is shallow, mark it to be unshallowed in this case
+    * check if the local repo is shallow, mark it to un-shallow in this case
     * fetch from the remote including all tags and overriding local tags in case they are set differently
 
     :param git_update: If the git remote already exists, should we try to update it
@@ -1038,7 +1049,7 @@ def make_sure_remote_apache_exists_and_fetch(git_update: bool, verbose: bool):
         if not git_update:
             return
     except subprocess.CalledProcessError as ex:
-        if ex.returncode == 128:
+        if ex.returncode == 128 or ex.returncode == 2:
             remote_add_command = [
                 "git",
                 "remote",
@@ -1068,7 +1079,7 @@ def make_sure_remote_apache_exists_and_fetch(git_update: bool, verbose: bool):
     if is_shallow_repo:
         if verbose:
             console.print(
-                "This will also unshallow the repository, "
+                "This will also un-shallow the repository, "
                 "making all history available and increasing storage!"
             )
         fetch_command.append("--unshallow")
@@ -1333,9 +1344,14 @@ def get_all_changes_for_package(
                         )
                         # Returns 66 in case of doc-only changes
                         sys.exit(66)
+                    if len(changes) > len(changes_since_last_doc_only_check):
+                        # if doc-only was released after previous release - use it as starting point
+                        # but if before - stay with the releases from last tag.
+                        changes = changes_since_last_doc_only_check
                 except subprocess.CalledProcessError:
                     # ignore when the commit mentioned as last doc-only change is obsolete
                     pass
+
             console.print(f"[yellow]The provider {provider_package_id} has changes since last release[/]")
             console.print()
             console.print(
@@ -1599,7 +1615,7 @@ def update_setup_files(
     version_suffix: str,
 ):
     """
-    Updates generated setup.cfg/setup.py/manifest.in/provider_info) for packages
+    Updates generated setup.cfg/setup.py/manifest.in/provider_info for packages
 
     :param provider_package_id: id of the package
     :param version_suffix: version suffix corresponding to the version in the code
@@ -1696,16 +1712,16 @@ def black_mode():
     config = parse_pyproject_toml(os.path.join(SOURCE_DIR_PATH, "pyproject.toml"))
 
     target_versions = set(
-        target_version_option_callback(None, None, config.get('target_version', [])),
+        target_version_option_callback(None, None, tuple(config.get('target_version', ()))),
     )
 
     return Mode(
         target_versions=target_versions,
         line_length=config.get('line_length', Mode.line_length),
-        is_pyi=config.get('is_pyi', Mode.is_pyi),
-        string_normalization=not config.get('skip_string_normalization', not Mode.string_normalization),
-        experimental_string_processing=config.get(
-            'experimental_string_processing', Mode.experimental_string_processing
+        is_pyi=bool(config.get('is_pyi', Mode.is_pyi)),
+        string_normalization=not bool(config.get('skip_string_normalization', not Mode.string_normalization)),
+        experimental_string_processing=bool(
+            config.get('experimental_string_processing', Mode.experimental_string_processing)
         ),
     )
 
@@ -1874,7 +1890,10 @@ def tag_exists_for_version(provider_package_id: str, current_tag: str, verbose: 
 @option_git_update
 @argument_package_id
 @option_verbose
-def generate_setup_files(version_suffix: str, git_update: bool, package_id: str, verbose: bool):
+@option_skip_tag_check
+def generate_setup_files(
+    version_suffix: str, git_update: bool, package_id: str, verbose: bool, skip_tag_check: bool
+):
     """
     Generates setup files for the package.
 
@@ -1882,20 +1901,17 @@ def generate_setup_files(version_suffix: str, git_update: bool, package_id: str,
     """
     provider_package_id = package_id
     with with_group(f"Generate setup files for '{provider_package_id}'"):
-        current_tag = get_current_tag(provider_package_id, version_suffix, git_update, verbose)
-        if tag_exists_for_version(provider_package_id, current_tag, verbose):
-            console.print(f"[yellow]The tag {current_tag} exists. Not preparing the package.[/]")
-            # Returns 1 in case of skipped package
-            sys.exit(1)
+        if not skip_tag_check:
+            current_tag = get_current_tag(provider_package_id, version_suffix, git_update, verbose)
+            if tag_exists_for_version(provider_package_id, current_tag, verbose):
+                console.print(f"[yellow]The tag {current_tag} exists. Not preparing the package.[/]")
+                # Returns 1 in case of skipped package
+                sys.exit(1)
+        if update_setup_files(provider_package_id, version_suffix):
+            console.print(f"[green]Generated regular package setup files for {provider_package_id}[/]")
         else:
-            if update_setup_files(
-                provider_package_id,
-                version_suffix,
-            ):
-                console.print(f"[green]Generated regular package setup files for {provider_package_id}[/]")
-            else:
-                # Returns 64 in case of skipped package
-                sys.exit(64)
+            # Returns 64 in case of skipped package
+            sys.exit(64)
 
 
 def get_current_tag(provider_package_id: str, suffix: str, git_update: bool, verbose: bool):
@@ -1919,8 +1935,8 @@ def cleanup_remnants(verbose: bool):
         shutil.rmtree(file, ignore_errors=True)
 
 
-def verify_setup_py_prepared(provider_package):
-    with open("setup.py") as f:
+def verify_setup_cfg_prepared(provider_package):
+    with open("setup.cfg") as f:
         setup_content = f.read()
     search_for = f"providers-{provider_package.replace('.','-')} for Apache Airflow"
     if search_for not in setup_content:
@@ -1946,12 +1962,14 @@ def verify_setup_py_prepared(provider_package):
 @option_version_suffix
 @argument_package_id
 @option_verbose
+@option_skip_tag_check
 def build_provider_packages(
     package_format: str,
     git_update: bool,
     version_suffix: str,
     package_id: str,
     verbose: bool,
+    skip_tag_check: bool,
 ):
     """
     Builds provider package.
@@ -1968,15 +1986,19 @@ def build_provider_packages(
     try:
         provider_package_id = package_id
         with with_group(f"Prepare provider package for '{provider_package_id}'"):
-            current_tag = get_current_tag(provider_package_id, version_suffix, git_update, verbose)
-            if tag_exists_for_version(provider_package_id, current_tag, verbose):
-                console.print(f"[yellow]The tag {current_tag} exists. Skipping the package.[/]")
-                return False
-            console.print(f"Changing directory to ${TARGET_PROVIDER_PACKAGES_PATH}")
+            if not skip_tag_check and (version_suffix.startswith("rc") or version_suffix == ""):
+                # For RC and official releases we check if the "officially released" version exists
+                # and skip the released if it was. This allows to skip packages that have not been
+                # marked for release. For "dev" suffixes, we always build all packages
+                released_tag = get_current_tag(provider_package_id, "", git_update, verbose)
+                if tag_exists_for_version(provider_package_id, released_tag, verbose):
+                    console.print(f"[yellow]The tag {released_tag} exists. Skipping the package.[/]")
+                    return False
+            console.print(f"Changing directory to {TARGET_PROVIDER_PACKAGES_PATH}")
             os.chdir(TARGET_PROVIDER_PACKAGES_PATH)
             cleanup_remnants(verbose)
             provider_package = package_id
-            verify_setup_py_prepared(provider_package)
+            verify_setup_cfg_prepared(provider_package)
 
             console.print(f"Building provider package: {provider_package} in format {package_format}")
             command = ["python3", "setup.py", "build", "--build-temp", tmp_build_dir]
@@ -2046,9 +2068,13 @@ def summarise_total_vs_bad_and_warnings(total: int, bad: int, warns: List[warnin
         console.print(f"[red]ERROR! There were {len(warns)} warnings generated during the import[/]")
         console.print()
         console.print("[yellow]Ideally, fix it, so that no warnings are generated during import.[/]")
-        console.print("[yellow]There are two cases that are legitimate deprecation warnings though:[/]")
+        console.print("[yellow]There are three cases that are legitimate deprecation warnings though:[/]")
         console.print("[yellow] 1) when you deprecate whole module or class and replace it in provider[/]")
         console.print("[yellow] 2) when 3rd-party module generates Deprecation and you cannot upgrade it[/]")
+        console.print(
+            "[yellow] 3) when many 3rd-party module generates same Deprecation warning that "
+            "comes from another common library[/]"
+        )
         console.print()
         console.print(
             "[yellow]In case 1), add the deprecation message to "
@@ -2057,6 +2083,10 @@ def summarise_total_vs_bad_and_warnings(total: int, bad: int, warns: List[warnin
         console.print(
             "[yellow]In case 2), add the deprecation message together with module it generates to "
             "the KNOWN_DEPRECATED_MESSAGES in prepare_provider_packages.py[/]"
+        )
+        console.print(
+            "[yellow]In case 3), add the deprecation message to "
+            "the KNOWN_COMMON_DEPRECATED_MESSAGES in prepare_provider_packages.py[/]"
         )
         console.print()
         raise_error = True
@@ -2077,6 +2107,11 @@ def summarise_total_vs_bad_and_warnings(total: int, bad: int, warns: List[warnin
 KNOWN_DEPRECATED_MESSAGES: Set[Tuple[str, str]] = {
     (
         'This version of Apache Beam has not been sufficiently tested on Python 3.9. '
+        'You may encounter bugs or missing features.',
+        "apache_beam",
+    ),
+    (
+        'This version of Apache Beam has not been sufficiently tested on Python 3.10. '
         'You may encounter bugs or missing features.',
         "apache_beam",
     ),
@@ -2113,8 +2148,27 @@ KNOWN_DEPRECATED_MESSAGES: Set[Tuple[str, str]] = {
         " adheres to: 'pyarrow<3.1.0,>=3.0.0; extra == \"pandas\"'",
         "snowflake",
     ),
+    (
+        "You have an incompatible version of 'pyarrow' installed (6.0.1), please install a version that"
+        " adheres to: 'pyarrow<5.1.0,>=5.0.0; extra == \"pandas\"'",
+        "snowflake",
+    ),
     ("SelectableGroups dict interface is deprecated. Use select.", "kombu"),
     ("The module cloudant is now deprecated. The replacement is ibmcloudant.", "cloudant"),
+    ("This module is deprecated. Please use `airflow.operators.empty`.", "dbt"),
+    ("This module is deprecated. Please use `airflow.operators.empty`.", "jdbc"),
+    ("This module is deprecated. Please use `airflow.operators.empty`.", "azure"),
+    ("This module is deprecated. Please use `airflow.operators.empty`.", "qubole"),
+    ("This module is deprecated. Please use `airflow.operators.empty`.", "winrm"),
+    ("This class is deprecated. Please use `airflow.operators.empty.EmptyOperator`.", "dbt"),
+    ("This class is deprecated. Please use `airflow.operators.empty.EmptyOperator`.", "jdbc"),
+    ("This class is deprecated. Please use `airflow.operators.empty.EmptyOperator`.", "azure"),
+    ("This class is deprecated. Please use `airflow.operators.empty.EmptyOperator`.", "qubole"),
+    ("This class is deprecated. Please use `airflow.operators.empty.EmptyOperator`.", "winrm"),
+}
+
+KNOWN_COMMON_DEPRECATED_MESSAGES: Set[str] = {
+    "distutils Version classes are deprecated. Use packaging.version instead."
 }
 
 # The set of warning messages generated by direct importing of some deprecated modules. We should only
@@ -2142,6 +2196,11 @@ KNOWN_DEPRECATED_DIRECT_IMPORTS: Set[str] = {
     "This module is deprecated. Please use `airflow.providers.tableau.hooks.tableau`.",
     "This module is deprecated. Please use `kubernetes.client.models.V1Volume`.",
     "This module is deprecated. Please use `kubernetes.client.models.V1VolumeMount`.",
+    (
+        "This module is deprecated. Please use `kubernetes.client.models.V1ResourceRequirements`"
+        " and `kubernetes.client.models.V1ContainerPort`."
+    ),
+    "This module is deprecated. Please use `kubernetes.client.models.V1EnvVar`.",
     'numpy.ufunc size changed, may indicate binary incompatibility. Expected 192 from C header,'
     ' got 216 from PyObject',
     "This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.step_function`.",
@@ -2152,6 +2211,24 @@ KNOWN_DEPRECATED_DIRECT_IMPORTS: Set[str] = {
     "This module is deprecated. Please use `airflow.providers.amazon.aws.operators.s3`.",
     "This module is deprecated. Please use `airflow.providers.amazon.aws.operators.dms`.",
     "This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.dms`.",
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.operators.emr`.',
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.emr`.',
+    "This module is deprecated. Please use `airflow.providers.amazon.aws.hooks.redshift_cluster` "
+    "or `airflow.providers.amazon.aws.hooks.redshift_sql` as appropriate.",
+    "This module is deprecated. Please use `airflow.providers.amazon.aws.operators.redshift_sql` "
+    "or `airflow.providers.amazon.aws.operators.redshift_cluster` as appropriate.",
+    "This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.redshift_cluster`.",
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.operators.sagemaker`.',
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.sagemaker`.',
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.hooks.emr`.',
+    'This module is deprecated. Please use `airflow.providers.opsgenie.hooks.opsgenie`.',
+    'This module is deprecated. Please use `airflow.providers.opsgenie.operators.opsgenie`.',
+    'This module is deprecated. Please use `airflow.hooks.redshift_sql` '
+    'or `airflow.hooks.redshift_cluster` as appropriate.',
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.operators.redshift_sql` or '
+    '`airflow.providers.amazon.aws.operators.redshift_cluster` as appropriate.',
+    'This module is deprecated. Please use `airflow.providers.amazon.aws.sensors.redshift_cluster`.',
+    "This module is deprecated. Please use airflow.providers.amazon.aws.transfers.sql_to_s3`.",
 }
 
 
@@ -2172,6 +2249,14 @@ def filter_direct_importlib_warning(warn: warnings.WarningMessage) -> bool:
     return True
 
 
+def filter_known_common_deprecated_messages(warn: warnings.WarningMessage) -> bool:
+    msg_string = str(warn.message).replace("\n", " ")
+    for m in KNOWN_COMMON_DEPRECATED_MESSAGES:
+        if msg_string == m:
+            return False
+    return True
+
+
 @cli.command()
 def verify_provider_classes():
     """Verifies names for all provider classes."""
@@ -2180,7 +2265,7 @@ def verify_provider_classes():
         imported_classes, warns = import_all_classes(
             provider_ids=provider_ids,
             print_imports=True,
-            paths=[PROVIDERS_PATH],
+            paths=[str(PROVIDERS_PATH)],
             prefix="airflow.providers.",
         )
         total = 0
@@ -2193,6 +2278,7 @@ def verify_provider_classes():
             bad += inc_bad
         warns = list(filter(filter_known_warnings, warns))
         warns = list(filter(filter_direct_importlib_warning, warns))
+        warns = list(filter(filter_known_common_deprecated_messages, warns))
         if not summarise_total_vs_bad_and_warnings(total, bad, warns):
             sys.exit(1)
 
@@ -2399,7 +2485,7 @@ def get_prs_for_package(package_id: str) -> List[int]:
                 skip_line = True
                 continue
             if extract_prs:
-                if all(c == '.' for c in line):
+                if len(line) > 1 and all(c == '.' for c in line.strip()):
                     # Header for next version reached
                     break
                 if line.startswith('.. Below changes are excluded from the changelog'):
@@ -2419,12 +2505,43 @@ class ProviderPRInfo(NamedTuple):
     pr_list: List[PullRequestOrIssue]
 
 
+def is_package_in_dist(dist_files: List[str], package: str) -> bool:
+    """Check if package has been prepared in dist folder."""
+    for file in dist_files:
+        if file.startswith(f'apache_airflow_providers_{package.replace(".","_")}') or file.startswith(
+            f'apache-airflow-providers-{package.replace(".","-")}'
+        ):
+            return True
+    return False
+
+
 @cli.command()
-@click.option('--github-token', envvar='GITHUB_TOKEN')
+@click.option(
+    '--github-token',
+    envvar='GITHUB_TOKEN',
+    help=textwrap.dedent(
+        """
+      Github token used to authenticate.
+      You can set omit it if you have GITHUB_TOKEN env variable set.
+      Can be generated with:
+      https://github.com/settings/tokens/new?description=Read%20sssues&scopes=repo:status"""
+    ),
+)
 @click.option('--suffix', default='rc1')
+@click.option(
+    '--only-available-in-dist',
+    is_flag=True,
+    help='Only consider package ids with packages prepared in the dist folder',
+)
 @click.option('--excluded-pr-list', type=str, help="Coma-separated list of PRs to exclude from the issue.")
 @argument_package_ids
-def generate_issue_content(package_ids: List[str], github_token: str, suffix: str, excluded_pr_list: str):
+def generate_issue_content(
+    package_ids: List[str],
+    github_token: str,
+    suffix: str,
+    only_available_in_dist: bool,
+    excluded_pr_list: str,
+):
     if not package_ids:
         package_ids = get_all_providers()
     """Generates content for issue to test the release."""
@@ -2435,8 +2552,16 @@ def generate_issue_content(package_ids: List[str], github_token: str, suffix: st
             excluded_prs = []
         all_prs: Set[int] = set()
         provider_prs: Dict[str, List[int]] = {}
+        if only_available_in_dist:
+            files_in_dist = os.listdir(str(DIST_PATH))
+        prepared_package_ids = []
         for package_id in package_ids:
-            console.print(f"Extracting PRs for provider {package_id}")
+            if not only_available_in_dist or is_package_in_dist(files_in_dist, package_id):
+                console.print(f"Extracting PRs for provider {package_id}")
+                prepared_package_ids.append(package_id)
+            else:
+                console.print(f"Skipping extracting PRs for provider {package_id} as it is missing in dist")
+                continue
             prs = get_prs_for_package(package_id)
             provider_prs[package_id] = list(filter(lambda pr: pr not in excluded_prs, prs))
             all_prs.update(provider_prs[package_id])
@@ -2462,7 +2587,7 @@ def generate_issue_content(package_ids: List[str], github_token: str, suffix: st
                 progress.advance(task)
         interesting_providers: Dict[str, ProviderPRInfo] = {}
         non_interesting_providers: Dict[str, ProviderPRInfo] = {}
-        for package_id in package_ids:
+        for package_id in prepared_package_ids:
             pull_request_list = [pull_requests[pr] for pr in provider_prs[package_id] if pr in pull_requests]
             provider_details = get_provider_details(package_id)
             if pull_request_list:

@@ -16,11 +16,14 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 
 from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.dms import DmsHook
 from airflow.sensors.base import BaseSensorOperator
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
 
 
 class DmsTaskBaseSensor(BaseSensorOperator):
@@ -30,19 +33,15 @@ class DmsTaskBaseSensor(BaseSensorOperator):
     Subclasses should set ``target_statuses`` and ``termination_statuses`` fields.
 
     :param replication_task_arn: AWS DMS replication task ARN
-    :type replication_task_arn: str
     :param aws_conn_id: aws connection to uses
-    :type aws_conn_id: str
     :param target_statuses: the target statuses, sensor waits until
         the task reaches any of these states
-    :type target_states: list[str]
     :param termination_statuses: the termination statuses, sensor fails when
         the task reaches any of these states
-    :type termination_statuses: list[str]
     """
 
-    template_fields = ['replication_task_arn']
-    template_ext = ()
+    template_fields: Sequence[str] = ('replication_task_arn',)
+    template_ext: Sequence[str] = ()
 
     def __init__(
         self,
@@ -56,8 +55,8 @@ class DmsTaskBaseSensor(BaseSensorOperator):
         super().__init__(*args, **kwargs)
         self.aws_conn_id = aws_conn_id
         self.replication_task_arn = replication_task_arn
-        self.target_statuses: Optional[Iterable[str]] = target_statuses
-        self.termination_statuses: Optional[Iterable[str]] = termination_statuses
+        self.target_statuses: Iterable[str] = target_statuses or []
+        self.termination_statuses: Iterable[str] = termination_statuses or []
         self.hook: Optional[DmsHook] = None
 
     def get_hook(self) -> DmsHook:
@@ -68,8 +67,8 @@ class DmsTaskBaseSensor(BaseSensorOperator):
         self.hook = DmsHook(self.aws_conn_id)
         return self.hook
 
-    def poke(self, context):
-        status: str = self.get_hook().get_task_status(self.replication_task_arn)
+    def poke(self, context: 'Context'):
+        status: Optional[str] = self.get_hook().get_task_status(self.replication_task_arn)
 
         if not status:
             raise AirflowException(
@@ -96,11 +95,10 @@ class DmsTaskCompletedSensor(DmsTaskBaseSensor):
         :ref:`howto/sensor:DmsTaskCompletedSensor`
 
     :param replication_task_arn: AWS DMS replication task ARN
-    :type replication_task_arn: str
     """
 
-    template_fields = ['replication_task_arn']
-    template_ext = ()
+    template_fields: Sequence[str] = ('replication_task_arn',)
+    template_ext: Sequence[str] = ()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

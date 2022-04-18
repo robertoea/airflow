@@ -15,6 +15,9 @@
     specific language governing permissions and limitations
     under the License.
 
+ .. WARNING:
+    IF YOU ARE UPDATING THIS FILE, CONSIDER UPDATING README.MD TOO.
+
 .. image:: /img/docker-logo.png
     :width: 100
 
@@ -27,6 +30,7 @@ Docker Image for Apache Airflow
     Home <self>
     build
     entrypoint
+    changelog
     recipes
 
 .. toctree::
@@ -44,11 +48,11 @@ Every time a new version of Airflow is released, the images are prepared in the
 `apache/airflow DockerHub <https://hub.docker.com/r/apache/airflow>`_
 for all the supported Python versions.
 
-You can find the following images there (Assuming Airflow version |airflow-version|):
+You can find the following images there (Assuming Airflow version :subst-code:`|airflow-version|`):
 
-* :subst-code:`apache/airflow:latest`              - the latest released Airflow image with default Python version (3.6 currently)
+* :subst-code:`apache/airflow:latest`              - the latest released Airflow image with default Python version (3.7 currently)
 * :subst-code:`apache/airflow:latest-pythonX.Y`    - the latest released Airflow image with specific Python version
-* :subst-code:`apache/airflow:|airflow-version|`           - the versioned Airflow image with default Python version (3.6 currently)
+* :subst-code:`apache/airflow:|airflow-version|`           - the versioned Airflow image with default Python version (3.7 currently)
 * :subst-code:`apache/airflow:|airflow-version|-pythonX.Y` - the versioned Airflow image with specific Python version
 
 Those are "reference" images. They contain the most common set of extras, dependencies and providers that are
@@ -79,7 +83,7 @@ are in default in the ``/opt/airflow/dags`` folder and logs are in the ``/opt/ai
 
 The working directory is ``/opt/airflow`` by default.
 
-If no :envvar:`AIRFLOW__CORE__SQL_ALCHEMY_CONN` variable is set then SQLite database is created in
+If no :envvar:`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` variable is set then SQLite database is created in
 ``${AIRFLOW_HOME}/airflow.db``.
 
 For example commands that start Airflow see: :ref:`entrypoint:commands`.

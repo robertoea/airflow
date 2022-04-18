@@ -17,11 +17,14 @@
 
 
 import json
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Sequence, Union
 
 from airflow.exceptions import AirflowException
 from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.step_function import StepFunctionHook
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
 
 
 class StepFunctionStartExecutionOperator(BaseOperator):
@@ -34,19 +37,14 @@ class StepFunctionStartExecutionOperator(BaseOperator):
         :class:`~airflow.models.BaseOperator`
 
     :param state_machine_arn: ARN of the Step Function State Machine
-    :type state_machine_arn: str
     :param name: The name of the execution.
-    :type name: Optional[str]
     :param state_machine_input: JSON data input to pass to the State Machine
-    :type state_machine_input: Union[Dict[str, any], str, None]
     :param aws_conn_id: aws connection to uses
-    :type aws_conn_id: str
     :param do_xcom_push: if True, execution_arn is pushed to XCom with key execution_arn.
-    :type do_xcom_push: bool
     """
 
-    template_fields = ['state_machine_arn', 'name', 'input']
-    template_ext = ()
+    template_fields: Sequence[str] = ('state_machine_arn', 'name', 'input')
+    template_ext: Sequence[str] = ()
     ui_color = '#f9c915'
 
     def __init__(
@@ -66,7 +64,7 @@ class StepFunctionStartExecutionOperator(BaseOperator):
         self.aws_conn_id = aws_conn_id
         self.region_name = region_name
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = StepFunctionHook(aws_conn_id=self.aws_conn_id, region_name=self.region_name)
 
         execution_arn = hook.start_execution(self.state_machine_arn, self.name, self.input)
@@ -89,13 +87,11 @@ class StepFunctionGetExecutionOutputOperator(BaseOperator):
         :class:`~airflow.models.BaseOperator`
 
     :param execution_arn: ARN of the Step Function State Machine Execution
-    :type execution_arn: str
     :param aws_conn_id: aws connection to use, defaults to 'aws_default'
-    :type aws_conn_id: str
     """
 
-    template_fields = ['execution_arn']
-    template_ext = ()
+    template_fields: Sequence[str] = ('execution_arn',)
+    template_ext: Sequence[str] = ()
     ui_color = '#f9c915'
 
     def __init__(
@@ -111,7 +107,7 @@ class StepFunctionGetExecutionOutputOperator(BaseOperator):
         self.aws_conn_id = aws_conn_id
         self.region_name = region_name
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = StepFunctionHook(aws_conn_id=self.aws_conn_id, region_name=self.region_name)
 
         execution_status = hook.describe_execution(self.execution_arn)

@@ -17,6 +17,7 @@
 # under the License.
 import contextlib
 import json
+import logging
 import os
 import signal
 import sys
@@ -94,12 +95,12 @@ def _prepare_app(broker_url=None, execute=None):
             set_event_loop(None)
 
 
-class TestCeleryExecutor(unittest.TestCase):
-    def setUp(self) -> None:
+class TestCeleryExecutor:
+    def setup_method(self) -> None:
         db.clear_db_runs()
         db.clear_db_jobs()
 
-    def tearDown(self) -> None:
+    def teardown_method(self) -> None:
         db.clear_db_runs()
         db.clear_db_jobs()
 
@@ -184,7 +185,7 @@ class TestCeleryExecutor(unittest.TestCase):
                 'command',
                 1,
                 None,
-                SimpleTaskInstance(ti=TaskInstance(task=task, run_id=None)),
+                SimpleTaskInstance.from_ti(ti=TaskInstance(task=task, run_id=None)),
             )
             key = ('fail', 'fake_simple_ti', when, 0)
             executor.queued_tasks[key] = value_tuple
@@ -196,10 +197,10 @@ class TestCeleryExecutor(unittest.TestCase):
     @pytest.mark.integration("redis")
     @pytest.mark.integration("rabbitmq")
     @pytest.mark.backend("mysql", "postgres")
-    def test_retry_on_error_sending_task(self):
+    def test_retry_on_error_sending_task(self, caplog):
         """Test that Airflow retries publishing tasks to Celery Broker at least 3 times"""
 
-        with _prepare_app(), self.assertLogs(celery_executor.log) as cm, mock.patch.object(
+        with _prepare_app(), caplog.at_level(logging.INFO), mock.patch.object(
             # Mock `with timeout()` to _instantly_ fail.
             celery_executor.timeout,
             "__enter__",
@@ -217,7 +218,7 @@ class TestCeleryExecutor(unittest.TestCase):
                 'command',
                 1,
                 None,
-                SimpleTaskInstance(ti=TaskInstance(task=task, run_id=None)),
+                SimpleTaskInstance.from_ti(ti=TaskInstance(task=task, run_id=None)),
             )
             key = ('fail', 'fake_simple_ti', when, 0)
             executor.queued_tasks[key] = value_tuple
@@ -227,28 +228,19 @@ class TestCeleryExecutor(unittest.TestCase):
             assert dict(executor.task_publish_retries) == {key: 2}
             assert 1 == len(executor.queued_tasks), "Task should remain in queue"
             assert executor.event_buffer == {}
-            assert (
-                "INFO:airflow.executors.celery_executor.CeleryExecutor:"
-                f"[Try 1 of 3] Task Timeout Error for Task: ({key})." in cm.output
-            )
+            assert f"[Try 1 of 3] Task Timeout Error for Task: ({key})." in caplog.text
 
             executor.heartbeat()
             assert dict(executor.task_publish_retries) == {key: 3}
             assert 1 == len(executor.queued_tasks), "Task should remain in queue"
             assert executor.event_buffer == {}
-            assert (
-                "INFO:airflow.executors.celery_executor.CeleryExecutor:"
-                f"[Try 2 of 3] Task Timeout Error for Task: ({key})." in cm.output
-            )
+            assert f"[Try 2 of 3] Task Timeout Error for Task: ({key})." in caplog.text
 
             executor.heartbeat()
             assert dict(executor.task_publish_retries) == {key: 4}
             assert 1 == len(executor.queued_tasks), "Task should remain in queue"
             assert executor.event_buffer == {}
-            assert (
-                "INFO:airflow.executors.celery_executor.CeleryExecutor:"
-                f"[Try 3 of 3] Task Timeout Error for Task: ({key})." in cm.output
-            )
+            assert f"[Try 3 of 3] Task Timeout Error for Task: ({key})." in caplog.text
 
             executor.heartbeat()
             assert dict(executor.task_publish_retries) == {}

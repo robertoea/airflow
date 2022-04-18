@@ -16,29 +16,32 @@
 # specific language governing permissions and limitations
 # under the License.
 """Task sub-commands"""
+import datetime
 import importlib
 import json
 import logging
 import os
 import textwrap
-from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
-from typing import List, Optional
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from typing import List, Optional, Tuple, Union
 
 from pendulum.parsing.exceptions import ParserError
 from sqlalchemy.orm.exc import NoResultFound
+from sqlalchemy.orm.session import Session
 
 from airflow import settings
 from airflow.cli.simple_table import AirflowConsole
 from airflow.configuration import conf
-from airflow.exceptions import AirflowException, DagRunNotFound
+from airflow.exceptions import AirflowException, DagRunNotFound, TaskInstanceNotFound
 from airflow.executors.executor_loader import ExecutorLoader
 from airflow.jobs.local_task_job import LocalTaskJob
 from airflow.models import DagPickle, TaskInstance
+from airflow.models.baseoperator import BaseOperator
 from airflow.models.dag import DAG
 from airflow.models.dagrun import DagRun
-from airflow.models.xcom import IN_MEMORY_DAGRUN_ID
 from airflow.ti_deps.dep_context import DepContext
 from airflow.ti_deps.dependencies_deps import SCHEDULER_QUEUED_DEPS
+from airflow.typing_compat import Literal
 from airflow.utils import cli as cli_utils
 from airflow.utils.cli import (
     get_dag,
@@ -50,48 +53,120 @@ from airflow.utils.cli import (
 from airflow.utils.dates import timezone
 from airflow.utils.log.logging_mixin import StreamLogWriter
 from airflow.utils.net import get_hostname
-from airflow.utils.session import create_session, provide_session
+from airflow.utils.session import NEW_SESSION, create_session, provide_session
+from airflow.utils.state import DagRunState
+
+log = logging.getLogger(__name__)
+
+CreateIfNecessary = Union[Literal[False], Literal["db"], Literal["memory"]]
 
 
-def _get_dag_run(dag, exec_date_or_run_id, create_if_necessary, session):
+def _generate_temporary_run_id() -> str:
+    """Generate a ``run_id`` for a DAG run that will be created temporarily.
+
+    This is used mostly by ``airflow task test`` to create a DAG run that will
+    be deleted after the task is run.
+    """
+    return f"__airflow_temporary_run_{timezone.utcnow().isoformat()}__"
+
+
+def _get_dag_run(
+    *,
+    dag: DAG,
+    exec_date_or_run_id: str,
+    create_if_necessary: CreateIfNecessary,
+    session: Session,
+) -> Tuple[DagRun, bool]:
+    """Try to retrieve a DAG run from a string representing either a run ID or logical date.
+
+    This checks DAG runs like this:
+
+    1. If the input ``exec_date_or_run_id`` matches a DAG run ID, return the run.
+    2. Try to parse the input as a date. If that works, and the resulting
+       date matches a DAG run's logical date, return the run.
+    3. If ``create_if_necessary`` is *False* and the input works for neither of
+       the above, raise ``DagRunNotFound``.
+    4. Try to create a new DAG run. If the input looks like a date, use it as
+       the logical date; otherwise use it as a run ID and set the logical date
+       to the current time.
+    """
     dag_run = dag.get_dagrun(run_id=exec_date_or_run_id, session=session)
     if dag_run:
-        return dag_run
+        return dag_run, False
 
-    execution_date = None
-    with suppress(ParserError, TypeError):
-        execution_date = timezone.parse(exec_date_or_run_id)
-
-    if create_if_necessary and not execution_date:
-        return DagRun(dag_id=dag.dag_id, run_id=exec_date_or_run_id)
     try:
-        return (
+        execution_date: Optional[datetime.datetime] = timezone.parse(exec_date_or_run_id)
+    except (ParserError, TypeError):
+        execution_date = None
+
+    try:
+        dag_run = (
             session.query(DagRun)
-            .filter(
-                DagRun.dag_id == dag.dag_id,
-                DagRun.execution_date == execution_date,
-            )
+            .filter(DagRun.dag_id == dag.dag_id, DagRun.execution_date == execution_date)
             .one()
         )
     except NoResultFound:
-        if create_if_necessary:
-            return DagRun(dag.dag_id, run_id=IN_MEMORY_DAGRUN_ID, execution_date=execution_date)
-        raise DagRunNotFound(
-            f"DagRun for {dag.dag_id} with run_id or execution_date of {exec_date_or_run_id!r} not found"
-        ) from None
+        if not create_if_necessary:
+            raise DagRunNotFound(
+                f"DagRun for {dag.dag_id} with run_id or execution_date of {exec_date_or_run_id!r} not found"
+            ) from None
+    else:
+        return dag_run, False
+
+    if execution_date is not None:
+        dag_run_execution_date = execution_date
+    else:
+        dag_run_execution_date = timezone.utcnow()
+    if create_if_necessary == "memory":
+        dag_run = DagRun(dag.dag_id, run_id=exec_date_or_run_id, execution_date=dag_run_execution_date)
+        return dag_run, True
+    elif create_if_necessary == "db":
+        dag_run = dag.create_dagrun(
+            state=DagRunState.QUEUED,
+            execution_date=dag_run_execution_date,
+            run_id=_generate_temporary_run_id(),
+            session=session,
+        )
+        return dag_run, True
+    raise ValueError(f"unknown create_if_necessary value: {create_if_necessary!r}")
 
 
 @provide_session
-def _get_ti(task, exec_date_or_run_id, create_if_necessary=False, session=None):
+def _get_ti(
+    task: BaseOperator,
+    exec_date_or_run_id: str,
+    map_index: int,
+    *,
+    create_if_necessary: CreateIfNecessary = False,
+    session: Session = NEW_SESSION,
+) -> Tuple[TaskInstance, bool]:
     """Get the task instance through DagRun.run_id, if that fails, get the TI the old way"""
-    dag_run = _get_dag_run(task.dag, exec_date_or_run_id, create_if_necessary, session)
+    if task.is_mapped:
+        if map_index < 0:
+            raise RuntimeError("No map_index passed to mapped task")
+    elif map_index >= 0:
+        raise RuntimeError("map_index passed to non-mapped task")
+    dag_run, dr_created = _get_dag_run(
+        dag=task.dag,
+        exec_date_or_run_id=exec_date_or_run_id,
+        create_if_necessary=create_if_necessary,
+        session=session,
+    )
 
-    ti = dag_run.get_task_instance(task.task_id)
-    if not ti and create_if_necessary:
-        ti = TaskInstance(task, run_id=dag_run.run_id)
+    ti_or_none = dag_run.get_task_instance(task.task_id, map_index=map_index, session=session)
+    if ti_or_none is None:
+        if not create_if_necessary:
+            raise TaskInstanceNotFound(
+                f"TaskInstance for {task.dag.dag_id}, {task.task_id}, map={map_index} with "
+                f"run_id or execution_date of {exec_date_or_run_id!r} not found"
+            )
+        # TODO: Validate map_index is in range?
+        ti = TaskInstance(task, run_id=dag_run.run_id, map_index=map_index)
         ti.dag_run = dag_run
+    else:
+        ti = ti_or_none
     ti.refresh_from_task(task)
-    return ti
+    return ti, dr_created
 
 
 def _run_task_by_selected_method(args, dag: DAG, ti: TaskInstance) -> None:
@@ -271,11 +346,11 @@ def task_run(args, dag=None):
 
     settings.MASK_SECRETS_IN_LOGS = True
 
-    # IMPORTANT, have to use the NullPool, otherwise, each "run" command may leave
+    # IMPORTANT, have to re-configure ORM with the NullPool, otherwise, each "run" command may leave
     # behind multiple open sleeping connections while heartbeating, which could
     # easily exceed the database connection limit when
     # processing hundreds of simultaneous tasks.
-    settings.configure_orm(disable_connection_pool=True)
+    settings.reconfigure_orm(disable_connection_pool=True)
 
     if args.pickle:
         print(f'Loading pickle id: {args.pickle}')
@@ -286,12 +361,12 @@ def task_run(args, dag=None):
         # Use DAG from parameter
         pass
     task = dag.get_task(task_id=args.task_id)
-    ti = _get_ti(task, args.execution_date_or_run_id)
+    ti, _ = _get_ti(task, args.execution_date_or_run_id, args.map_index)
     ti.init_run_context(raw=args.raw)
 
     hostname = get_hostname()
 
-    print(f"Running {ti} on host {hostname}")
+    log.info("Running %s on host %s", ti, hostname)
 
     if args.interactive:
         _run_task_by_selected_method(args, dag, ti)
@@ -314,7 +389,7 @@ def task_failed_deps(args):
     """
     dag = get_dag(args.subdir, args.dag_id)
     task = dag.get_task(task_id=args.task_id)
-    ti = _get_ti(task, args.execution_date_or_run_id)
+    ti, _ = _get_ti(task, args.execution_date_or_run_id, args.map_index)
 
     dep_context = DepContext(deps=SCHEDULER_QUEUED_DEPS)
     failed_deps = list(ti.get_failed_dep_statuses(dep_context=dep_context))
@@ -337,7 +412,7 @@ def task_state(args):
     """
     dag = get_dag(args.subdir, args.dag_id)
     task = dag.get_task(task_id=args.task_id)
-    ti = _get_ti(task, args.execution_date_or_run_id)
+    ti, _ = _get_ti(task, args.execution_date_or_run_id, args.map_index)
     print(ti.current_state())
 
 
@@ -456,7 +531,7 @@ def task_test(args, dag=None):
     if task.params:
         task.params.validate()
 
-    ti = _get_ti(task, args.execution_date_or_run_id, create_if_necessary=True)
+    ti, dr_created = _get_ti(task, args.execution_date_or_run_id, args.map_index, create_if_necessary="db")
 
     try:
         if args.dry_run:
@@ -474,6 +549,9 @@ def task_test(args, dag=None):
             # Make sure to reset back to normal. When run for CLI this doesn't
             # matter, but it does for test suite
             logging.getLogger('airflow.task').propagate = False
+        if dr_created:
+            with create_session() as session:
+                session.delete(ti.dag_run)
 
 
 @cli_utils.action_cli(check_db=False)
@@ -482,7 +560,7 @@ def task_render(args):
     """Renders and displays templated fields for a given task"""
     dag = get_dag(args.subdir, args.dag_id)
     task = dag.get_task(task_id=args.task_id)
-    ti = _get_ti(task, args.execution_date_or_run_id, create_if_necessary=True)
+    ti, _ = _get_ti(task, args.execution_date_or_run_id, args.map_index, create_if_necessary="memory")
     ti.render_templates()
     for attr in task.__class__.template_fields:
         print(

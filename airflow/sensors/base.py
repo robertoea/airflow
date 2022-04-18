@@ -22,7 +22,7 @@ import hashlib
 import time
 import warnings
 from datetime import timedelta
-from typing import Any, Callable, Dict, Iterable
+from typing import Any, Callable, Iterable, Optional, Union
 
 from airflow import settings
 from airflow.configuration import conf
@@ -37,6 +37,7 @@ from airflow.models.skipmixin import SkipMixin
 from airflow.models.taskreschedule import TaskReschedule
 from airflow.ti_deps.deps.ready_to_reschedule import ReadyToRescheduleDep
 from airflow.utils import timezone
+from airflow.utils.context import Context
 
 # We need to keep the import here because GCSToLocalFilesystemOperator released in
 # Google Provider before 3.0.0 imported apply_defaults from here.
@@ -55,6 +56,23 @@ def _is_metadatabase_mysql() -> bool:
     return settings.engine.url.get_backend_name() == "mysql"
 
 
+class PokeReturnValue:
+    """
+    Sensors can optionally return an instance of the PokeReturnValue class in the poke method.
+    If an XCom value is supplied when the sensor is done, then the XCom value will be
+    pushed through the operator return value.
+    :param is_done: Set to true to indicate the sensor can stop poking.
+    :param xcom_value: An optional XCOM value to be returned by the operator.
+    """
+
+    def __init__(self, is_done: bool, xcom_value: Optional[Any] = None) -> None:
+        self.xcom_value = xcom_value
+        self.is_done = is_done
+
+    def __bool__(self) -> bool:
+        return self.is_done
+
+
 class BaseSensorOperator(BaseOperator, SkipMixin):
     """
     Sensor operators are derived from this class and inherit these attributes.
@@ -63,12 +81,9 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
     a criteria is met and fail if and when they time out.
 
     :param soft_fail: Set to true to mark the task as SKIPPED on failure
-    :type soft_fail: bool
     :param poke_interval: Time in seconds that the job should wait in
         between each tries
-    :type poke_interval: float
     :param timeout: Time, in seconds before the task times out and fails.
-    :type timeout: float
     :param mode: How the sensor operates.
         Options are: ``{ poke | reschedule }``, default is ``poke``.
         When set to ``poke`` the sensor is taking up a worker slot for its
@@ -81,10 +96,8 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
         this mode if the time before the criteria is met is expected to be
         quite long. The poke interval should be more than one minute to
         prevent too much load on the scheduler.
-    :type mode: str
     :param exponential_backoff: allow progressive longer waits between
         pokes by using exponential backoff algorithm
-    :type exponential_backoff: bool
     """
 
     ui_color = '#e6f1f2'  # type: str
@@ -105,6 +118,10 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
         'email_on_retry',
         'email_on_failure',
     )
+
+    # Adds one additional dependency for all sensor operators that checks if a
+    # sensor task instance can be rescheduled.
+    deps = BaseOperator.deps | {ReadyToRescheduleDep()}
 
     def __init__(
         self,
@@ -150,7 +167,7 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
                     f"mode since it will take reschedule time over MySQL's TIMESTAMP limit."
                 )
 
-    def poke(self, context: Dict) -> bool:
+    def poke(self, context: Context) -> Union[bool, PokeReturnValue]:
         """
         Function that the sensors defined while deriving this class should
         override.
@@ -164,9 +181,8 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
             self.on_retry_callback,
             self.on_failure_callback,
         ]
-        for status in check_list:
-            if status:
-                return False
+        if any(check_list):
+            return False
 
         operator = self.__class__.__name__
         return operator in self.sensors_support_sensor_service
@@ -224,8 +240,8 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
             result['execution_timeout'] = result['execution_timeout'].total_seconds()
         return result
 
-    def execute(self, context: Dict) -> Any:
-        started_at = None
+    def execute(self, context: Context) -> Any:
+        started_at: Union[datetime.datetime, float]
 
         if self.reschedule:
 
@@ -235,28 +251,34 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
             task_reschedules = TaskReschedule.find_for_task_instance(
                 context['ti'], try_number=first_try_number
             )
-            if task_reschedules:
-                started_at = task_reschedules[0].start_date
+            if not task_reschedules:
+                start_date = timezone.utcnow()
             else:
-                started_at = timezone.utcnow()
+                start_date = task_reschedules[0].start_date
+            started_at = start_date
 
             def run_duration() -> float:
                 # If we are in reschedule mode, then we have to compute diff
                 # based on the time in a DB, so can't use time.monotonic
-                nonlocal started_at
-                return (timezone.utcnow() - started_at).total_seconds()
+                return (timezone.utcnow() - start_date).total_seconds()
 
         else:
-            started_at = time.monotonic()
+            started_at = start_monotonic = time.monotonic()
 
             def run_duration() -> float:
-                nonlocal started_at
-                return time.monotonic() - started_at
+                return time.monotonic() - start_monotonic
 
         try_number = 1
         log_dag_id = self.dag.dag_id if self.has_dag() else ""
 
-        while not self.poke(context):
+        xcom_value = None
+        while True:
+            poke_return = self.poke(context)
+            if poke_return:
+                if isinstance(poke_return, PokeReturnValue):
+                    xcom_value = poke_return.xcom_value
+                break
+
             if run_duration() > self.timeout:
                 # If sensor is in soft fail mode but times out raise AirflowSkipException.
                 if self.soft_fail:
@@ -276,24 +298,30 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
                 time.sleep(self._get_next_poke_interval(started_at, run_duration, try_number))
                 try_number += 1
         self.log.info("Success criteria met. Exiting.")
+        return xcom_value
 
-    def _get_next_poke_interval(self, started_at: Any, run_duration: Callable[[], int], try_number):
+    def _get_next_poke_interval(
+        self,
+        started_at: Union[datetime.datetime, float],
+        run_duration: Callable[[], float],
+        try_number: int,
+    ) -> float:
         """Using the similar logic which is used for exponential backoff retry delay for operators."""
-        if self.exponential_backoff:
-            min_backoff = int(self.poke_interval * (2 ** (try_number - 2)))
-
-            run_hash = int(
-                hashlib.sha1(f"{self.dag_id}#{self.task_id}#{started_at}#{try_number}".encode()).hexdigest(),
-                16,
-            )
-            modded_hash = min_backoff + run_hash % min_backoff
-
-            delay_backoff_in_seconds = min(modded_hash, timedelta.max.total_seconds() - 1)
-            new_interval = min(self.timeout - int(run_duration()), delay_backoff_in_seconds)
-            self.log.info("new %s interval is %s", self.mode, new_interval)
-            return new_interval
-        else:
+        if not self.exponential_backoff:
             return self.poke_interval
+
+        min_backoff = int(self.poke_interval * (2 ** (try_number - 2)))
+
+        run_hash = int(
+            hashlib.sha1(f"{self.dag_id}#{self.task_id}#{started_at}#{try_number}".encode()).hexdigest(),
+            16,
+        )
+        modded_hash = min_backoff + run_hash % min_backoff
+
+        delay_backoff_in_seconds = min(modded_hash, timedelta.max.total_seconds() - 1)
+        new_interval = min(self.timeout - int(run_duration()), delay_backoff_in_seconds)
+        self.log.info("new %s interval is %s", self.mode, new_interval)
+        return new_interval
 
     def prepare_for_execution(self) -> BaseOperator:
         task = super().prepare_for_execution()
@@ -310,16 +338,6 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
         """Define mode rescheduled sensors."""
         return self.mode == 'reschedule'
 
-    @property
-    def deps(self):
-        """
-        Adds one additional dependency for all sensor operators that
-        checks if a sensor task instance can be rescheduled.
-        """
-        if self.reschedule:
-            return super().deps | {ReadyToRescheduleDep()}
-        return super().deps
-
 
 def poke_mode_only(cls):
     """
@@ -330,7 +348,6 @@ def poke_mode_only(cls):
     the mode from 'poke'.
 
     :param cls: BaseSensor class to enforce methods only use 'poke' mode.
-    :type cls: type
     """
 
     def decorate(cls_type):

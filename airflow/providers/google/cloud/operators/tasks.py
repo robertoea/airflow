@@ -21,15 +21,20 @@ This module contains various Google Cloud Tasks operators
 which allow you to perform basic operations using
 Cloud Tasks queues/tasks.
 """
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Optional, Sequence, Tuple, Union
 
 from google.api_core.exceptions import AlreadyExists
+from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.api_core.retry import Retry
 from google.cloud.tasks_v2.types import Queue, Task
 from google.protobuf.field_mask_pb2 import FieldMask
 
 from airflow.models import BaseOperator
 from airflow.providers.google.cloud.hooks.tasks import CloudTasksHook
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
+
 
 MetaData = Sequence[Tuple[str, str]]
 
@@ -43,28 +48,20 @@ class CloudTasksQueueCreateOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueueCreateOperator`
 
     :param location: The location name in which the queue will be created.
-    :type location: str
     :param task_queue: The task queue to create.
         Queue's name cannot be the same as an existing queue.
         If a dict is provided, it must be of the same form as the protobuf message Queue.
-    :type task_queue: dict or google.cloud.tasks_v2.types.Queue
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param queue_name: (Optional) The queue's name.
         If provided, it will be used to construct the full queue path.
-    :type queue_name: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -73,12 +70,11 @@ class CloudTasksQueueCreateOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Queue
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "task_queue",
         "project_id",
         "location",
@@ -94,9 +90,9 @@ class CloudTasksQueueCreateOperator(BaseOperator):
         task_queue: Queue,
         project_id: Optional[str] = None,
         queue_name: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -112,7 +108,7 @@ class CloudTasksQueueCreateOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -128,6 +124,8 @@ class CloudTasksQueueCreateOperator(BaseOperator):
                 metadata=self.metadata,
             )
         except AlreadyExists:
+            if self.queue_name is None:
+                raise RuntimeError("The queue name should be set here!")
             queue = hook.get_queue(
                 location=self.location,
                 project_id=self.project_id,
@@ -151,31 +149,22 @@ class CloudTasksQueueUpdateOperator(BaseOperator):
     :param task_queue: The task queue to update.
         This method creates the queue if it does not exist and updates the queue if
         it does exist. The queue's name must be specified.
-    :type task_queue: dict or google.cloud.tasks_v2.types.Queue
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param location: (Optional) The location name in which the queue will be updated.
         If provided, it will be used to construct the full queue path.
-    :type location: str
     :param queue_name: (Optional) The queue's name.
         If provided, it will be used to construct the full queue path.
-    :type queue_name: str
     :param update_mask: A mast used to specify which fields of the queue are being updated.
         If empty, then all fields will be updated.
         If a dict is provided, it must be of the same form as the protobuf message.
-    :type update_mask: dict or google.protobuf.field_mask_pb2.FieldMask
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -184,12 +173,11 @@ class CloudTasksQueueUpdateOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Queue
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "task_queue",
         "project_id",
         "location",
@@ -206,10 +194,10 @@ class CloudTasksQueueUpdateOperator(BaseOperator):
         project_id: Optional[str] = None,
         location: Optional[str] = None,
         queue_name: Optional[str] = None,
-        update_mask: Optional[Union[Dict, FieldMask]] = None,
-        retry: Optional[Retry] = None,
+        update_mask: Optional[FieldMask] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -226,7 +214,7 @@ class CloudTasksQueueUpdateOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -253,23 +241,16 @@ class CloudTasksQueueGetOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueueGetOperator`
 
     :param location: The location name in which the queue was created.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -278,12 +259,11 @@ class CloudTasksQueueGetOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Queue
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -297,9 +277,9 @@ class CloudTasksQueueGetOperator(BaseOperator):
         location: str,
         queue_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -314,7 +294,7 @@ class CloudTasksQueueGetOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -339,26 +319,18 @@ class CloudTasksQueuesListOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueuesListOperator`
 
     :param location: The location name in which the queues were created.
-    :type location: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param results_filter: (Optional) Filter used to specify a subset of queues.
-    :type results_filter: str
     :param page_size: (Optional) The maximum number of resources contained in the
         underlying API response.
-    :type page_size: int
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -367,12 +339,11 @@ class CloudTasksQueuesListOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: list[google.cloud.tasks_v2.types.Queue]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "project_id",
         "gcp_conn_id",
@@ -386,9 +357,9 @@ class CloudTasksQueuesListOperator(BaseOperator):
         project_id: Optional[str] = None,
         results_filter: Optional[str] = None,
         page_size: Optional[int] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -404,7 +375,7 @@ class CloudTasksQueuesListOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -430,23 +401,16 @@ class CloudTasksQueueDeleteOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueueDeleteOperator`
 
     :param location: The location name in which the queue will be deleted.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -455,10 +419,9 @@ class CloudTasksQueueDeleteOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -472,9 +435,9 @@ class CloudTasksQueueDeleteOperator(BaseOperator):
         location: str,
         queue_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -489,7 +452,7 @@ class CloudTasksQueueDeleteOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -513,23 +476,16 @@ class CloudTasksQueuePurgeOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueuePurgeOperator`
 
     :param location: The location name in which the queue will be purged.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -538,12 +494,11 @@ class CloudTasksQueuePurgeOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: list[google.cloud.tasks_v2.types.Queue]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -557,9 +512,9 @@ class CloudTasksQueuePurgeOperator(BaseOperator):
         location: str,
         queue_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -574,7 +529,7 @@ class CloudTasksQueuePurgeOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -599,23 +554,16 @@ class CloudTasksQueuePauseOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueuePauseOperator`
 
     :param location: The location name in which the queue will be paused.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -624,12 +572,11 @@ class CloudTasksQueuePauseOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: list[google.cloud.tasks_v2.types.Queue]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -643,9 +590,9 @@ class CloudTasksQueuePauseOperator(BaseOperator):
         location: str,
         queue_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -660,7 +607,7 @@ class CloudTasksQueuePauseOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -685,23 +632,16 @@ class CloudTasksQueueResumeOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksQueueResumeOperator`
 
     :param location: The location name in which the queue will be resumed.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -710,12 +650,11 @@ class CloudTasksQueueResumeOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: list[google.cloud.tasks_v2.types.Queue]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -729,9 +668,9 @@ class CloudTasksQueueResumeOperator(BaseOperator):
         location: str,
         queue_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -746,7 +685,7 @@ class CloudTasksQueueResumeOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -771,32 +710,22 @@ class CloudTasksTaskCreateOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksTaskCreateOperator`
 
     :param location: The location name in which the task will be created.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param task: The task to add.
         If a dict is provided, it must be of the same form as the protobuf message Task.
-    :type task: dict or google.cloud.tasks_v2.types.Task
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param task_name: (Optional) The task's name.
         If provided, it will be used to construct the full task path.
-    :type task_name: str
     :param response_view: (Optional) This field specifies which subset of the Task will
         be returned.
-    :type response_view: google.cloud.tasks_v2.enums.Task.View
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -805,12 +734,11 @@ class CloudTasksTaskCreateOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Task
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "task",
         "project_id",
         "location",
@@ -829,9 +757,9 @@ class CloudTasksTaskCreateOperator(BaseOperator):
         project_id: Optional[str] = None,
         task_name: Optional[str] = None,
         response_view: Optional[Task.View] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -849,7 +777,7 @@ class CloudTasksTaskCreateOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -877,28 +805,19 @@ class CloudTasksTaskGetOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksTaskGetOperator`
 
     :param location: The location name in which the task was created.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param task_name: The task's name.
-    :type task_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param response_view: (Optional) This field specifies which subset of the Task will
         be returned.
-    :type response_view: google.cloud.tasks_v2.enums.Task.View
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -907,12 +826,11 @@ class CloudTasksTaskGetOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Task
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "task_name",
@@ -929,9 +847,9 @@ class CloudTasksTaskGetOperator(BaseOperator):
         task_name: str,
         project_id: Optional[str] = None,
         response_view: Optional[Task.View] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -948,7 +866,7 @@ class CloudTasksTaskGetOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -975,29 +893,20 @@ class CloudTasksTasksListOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksTasksListOperator`
 
     :param location: The location name in which the tasks were created.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param response_view: (Optional) This field specifies which subset of the Task will
         be returned.
-    :type response_view: google.cloud.tasks_v2.enums.Task.View
     :param page_size: (Optional) The maximum number of resources contained in the
         underlying API response.
-    :type page_size: int
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -1006,12 +915,11 @@ class CloudTasksTasksListOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: list[google.cloud.tasks_v2.types.Task]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "project_id",
@@ -1027,9 +935,9 @@ class CloudTasksTasksListOperator(BaseOperator):
         project_id: Optional[str] = None,
         response_view: Optional[Task.View] = None,
         page_size: Optional[int] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -1046,7 +954,7 @@ class CloudTasksTasksListOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -1073,25 +981,17 @@ class CloudTasksTaskDeleteOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksTaskDeleteOperator`
 
     :param location: The location name in which the task will be deleted.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param task_name: The task's name.
-    :type task_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -1100,10 +1000,9 @@ class CloudTasksTaskDeleteOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "task_name",
@@ -1119,9 +1018,9 @@ class CloudTasksTaskDeleteOperator(BaseOperator):
         queue_name: str,
         task_name: str,
         project_id: Optional[str] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -1137,7 +1036,7 @@ class CloudTasksTaskDeleteOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -1162,28 +1061,19 @@ class CloudTasksTaskRunOperator(BaseOperator):
         :ref:`howto/operator:CloudTasksTaskRunOperator`
 
     :param location: The location name in which the task was created.
-    :type location: str
     :param queue_name: The queue's name.
-    :type queue_name: str
     :param task_name: The task's name.
-    :type task_name: str
     :param project_id: (Optional) The ID of the Google Cloud project that owns the Cloud Tasks.
         If set to None or missing, the default project_id from the Google Cloud connection is used.
-    :type project_id: str
     :param response_view: (Optional) This field specifies which subset of the Task will
         be returned.
-    :type response_view: google.cloud.tasks_v2.Task.View
     :param retry: (Optional) A retry object used to retry requests.
         If None is specified, requests will not be retried.
-    :type retry: google.api_core.retry.Retry
     :param timeout: (Optional) The amount of time, in seconds, to wait for the request
         to complete. Note that if retry is specified, the timeout applies to each
         individual attempt.
-    :type timeout: float
     :param metadata: (Optional) Additional metadata that is provided to the method.
-    :type metadata: sequence[tuple[str, str]]]
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
-    :type gcp_conn_id: str
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -1192,12 +1082,11 @@ class CloudTasksTaskRunOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :type impersonation_chain: Union[str, Sequence[str]]
 
     :rtype: google.cloud.tasks_v2.types.Task
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "location",
         "queue_name",
         "task_name",
@@ -1214,9 +1103,9 @@ class CloudTasksTaskRunOperator(BaseOperator):
         task_name: str,
         project_id: Optional[str] = None,
         response_view: Optional[Task.View] = None,
-        retry: Optional[Retry] = None,
+        retry: Union[Retry, _MethodDefault] = DEFAULT,
         timeout: Optional[float] = None,
-        metadata: Optional[MetaData] = None,
+        metadata: MetaData = (),
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         **kwargs,
@@ -1233,7 +1122,7 @@ class CloudTasksTaskRunOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
-    def execute(self, context):
+    def execute(self, context: 'Context'):
         hook = CloudTasksHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,

@@ -80,14 +80,17 @@ app = Celery(conf.get('celery', 'CELERY_APP_NAME'), config_source=celery_configu
 def execute_command(command_to_exec: CommandType) -> None:
     """Executes command."""
     BaseExecutor.validate_command(command_to_exec)
-    log.info("Executing command in Celery: %s", command_to_exec)
     celery_task_id = app.current_task.request.id
-    log.info(f"Celery task ID: {celery_task_id}")
+    log.info("[%s] Executing command in Celery: %s", celery_task_id, command_to_exec)
 
-    if settings.EXECUTE_TASKS_NEW_PYTHON_INTERPRETER:
-        _execute_in_subprocess(command_to_exec, celery_task_id)
-    else:
-        _execute_in_fork(command_to_exec, celery_task_id)
+    try:
+        if settings.EXECUTE_TASKS_NEW_PYTHON_INTERPRETER:
+            _execute_in_subprocess(command_to_exec, celery_task_id)
+        else:
+            _execute_in_fork(command_to_exec, celery_task_id)
+    except Exception:
+        Stats.incr("celery.execute_command.failure")
+        raise
 
 
 def _execute_in_fork(command_to_exec: CommandType, celery_task_id: Optional[str] = None) -> None:
@@ -98,7 +101,8 @@ def _execute_in_fork(command_to_exec: CommandType, celery_task_id: Optional[str]
         if ret == 0:
             return
 
-        raise AirflowException('Celery command failed on host: ' + get_hostname())
+        msg = f'Celery command failed on host: {get_hostname()} with celery_task_id {celery_task_id}'
+        raise AirflowException(msg)
 
     from airflow.sentry import Sentry
 
@@ -121,7 +125,7 @@ def _execute_in_fork(command_to_exec: CommandType, celery_task_id: Optional[str]
         args.func(args)
         ret = 0
     except Exception as e:
-        log.exception("Failed to execute task %s.", str(e))
+        log.exception("[%s] Failed to execute task %s.", celery_task_id, str(e))
         ret = 1
     finally:
         Sentry.flush()
@@ -136,9 +140,9 @@ def _execute_in_subprocess(command_to_exec: CommandType, celery_task_id: Optiona
     try:
         subprocess.check_output(command_to_exec, stderr=subprocess.STDOUT, close_fds=True, env=env)
     except subprocess.CalledProcessError as e:
-        log.exception('execute_command encountered a CalledProcessError')
+        log.exception('[%s] execute_command encountered a CalledProcessError', celery_task_id)
         log.error(e.output)
-        msg = 'Celery command failed on host: ' + get_hostname()
+        msg = f'Celery command failed on host: {get_hostname()} with celery_task_id {celery_task_id}'
         raise AirflowException(msg)
 
 
@@ -147,9 +151,7 @@ class ExceptionWithTraceback:
     Wrapper class used to propagate exceptions to parent processes from subprocesses.
 
     :param exception: The exception to wrap
-    :type exception: Exception
     :param exception_traceback: The stacktrace to wrap
-    :type exception_traceback: str
     """
 
     def __init__(self, exception: Exception, exception_traceback: str):
@@ -506,7 +508,6 @@ def fetch_celery_task_state(async_result: AsyncResult) -> Tuple[str, Union[str, 
 
     :param async_result: a tuple of the Celery task key and the async Celery object used
         to fetch the task's state
-    :type async_result: tuple(str, celery.result.AsyncResult)
     :return: a tuple of the Celery task key and the Celery state and the celery info
         of the task
     :rtype: tuple[str, str, str]

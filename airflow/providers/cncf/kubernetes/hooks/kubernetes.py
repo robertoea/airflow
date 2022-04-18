@@ -61,7 +61,6 @@ class KubernetesHook(BaseHook):
 
     :param conn_id: The :ref:`kubernetes connection <howto/connection:kubernetes>`
         to Kubernetes cluster.
-    :type conn_id: str
     """
 
     conn_name_attr = 'kubernetes_conn_id'
@@ -93,7 +92,7 @@ class KubernetesHook(BaseHook):
         }
 
     @staticmethod
-    def get_ui_field_behaviour() -> Dict:
+    def get_ui_field_behaviour() -> Dict[str, Any]:
         """Returns custom field behaviour"""
         return {
             "hidden_fields": ['host', 'schema', 'login', 'password', 'port', 'extra'],
@@ -195,24 +194,33 @@ class KubernetesHook(BaseHook):
         Creates custom resource definition object in Kubernetes
 
         :param group: api group
-        :type group: str
         :param version: api version
-        :type version: str
         :param plural: api plural
-        :type plural: str
         :param body: crd object definition
-        :type body: Union[str, dict]
         :param namespace: kubernetes namespace
-        :type namespace: str
         """
         api = client.CustomObjectsApi(self.api_client)
         if namespace is None:
             namespace = self.get_namespace()
         if isinstance(body, str):
-            body = _load_body_to_dict(body)
+            body_dict = _load_body_to_dict(body)
+        else:
+            body_dict = body
+        try:
+            api.delete_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=body_dict["metadata"]["name"],
+            )
+            self.log.warning("Deleted SparkApplication with the same name.")
+        except client.rest.ApiException:
+            self.log.info(f"SparkApp {body_dict['metadata']['name']} not found.")
+
         try:
             response = api.create_namespaced_custom_object(
-                group=group, version=version, namespace=namespace, plural=plural, body=body
+                group=group, version=version, namespace=namespace, plural=plural, body=body_dict
             )
             self.log.debug("Response: %s", response)
             return response
@@ -226,15 +234,10 @@ class KubernetesHook(BaseHook):
         Get custom resource definition object from Kubernetes
 
         :param group: api group
-        :type group: str
         :param version: api version
-        :type version: str
         :param plural: api plural
-        :type plural: str
         :param name: crd object name
-        :type name: str
         :param namespace: kubernetes namespace
-        :type namespace: str
         """
         api = client.CustomObjectsApi(self.api_client)
         if namespace is None:
@@ -266,10 +269,8 @@ class KubernetesHook(BaseHook):
         Retrieves a log stream for a container in a kubernetes pod.
 
         :param pod_name: pod name
-        :type pod_name: str
         :param container: container name
         :param namespace: kubernetes namespace
-        :type namespace: str
         """
         api = client.CoreV1Api(self.api_client)
         watcher = watch.Watch()
@@ -293,10 +294,8 @@ class KubernetesHook(BaseHook):
         Retrieves a container's log from the specified pod.
 
         :param pod_name: pod name
-        :type pod_name: str
         :param container: container name
         :param namespace: kubernetes namespace
-        :type namespace: str
         """
         api = client.CoreV1Api(self.api_client)
         return api.read_namespaced_pod_log(

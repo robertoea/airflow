@@ -91,7 +91,7 @@ class DagRunInfo(NamedTuple):
         return cls(run_after=end, data_interval=DataInterval(start, end))
 
     @property
-    def logical_date(self) -> DateTime:
+    def logical_date(self: "DagRunInfo") -> DateTime:
         """Infer the logical date to represent a DagRun.
 
         This replaces ``execution_date`` in Airflow 2.1 and prior. The idea is
@@ -152,7 +152,6 @@ class Timetable(Protocol):
 
         :raises: AirflowTimetableInvalid on validation failure.
         """
-        pass
 
     @property
     def summary(self) -> str:

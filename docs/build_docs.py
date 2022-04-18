@@ -52,6 +52,7 @@ Invitation link: https://s.apache.org/airflow-slack\
 
 ERRORS_ELIGIBLE_TO_REBUILD = [
     'failed to reach any of the inventories with the following issues',
+    'toctree contains reference to nonexisting document',
     'undefined label:',
     'unknown document:',
     'Error loading airflow.providers',
@@ -68,12 +69,12 @@ def _promote_new_flags():
     console.print()
     if ON_GITHUB_ACTIONS:
         console.print("You can quickly build documentation locally with just one command.")
-        console.print("    [blue]./breeze build-docs[/]")
+        console.print("    [blue]breeze build-docs[/]")
         console.print()
         console.print("[yellow]Still too slow?[/]")
         console.print()
     console.print("You can only build one documentation package:")
-    console.print("    [blue]./breeze build-docs -- --package-filter <PACKAGE-NAME>[/]")
+    console.print("    [blue]breeze build-docs --package-filter <PACKAGE-NAME>[/]")
     console.print()
     console.print("This usually takes from [yellow]20 seconds[/] to [yellow]2 minutes[/].")
     console.print()
@@ -82,7 +83,7 @@ def _promote_new_flags():
     console.print("   [blue]--spellcheck-only - Only perform spellchecking[/]")
     console.print()
     console.print("For more info:")
-    console.print("   [blue]./breeze build-docs --help[/]")
+    console.print("   [blue]breeze build-docs --help[/]")
     console.print()
 
 

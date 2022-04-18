@@ -10,6 +10,7 @@
 .coverage
 .coveragerc
 .codecov.yml
+.codespellignorelines
 .eslintrc
 .eslintignore
 .flake8
@@ -113,3 +114,6 @@ chart/values_schema.schema.json
 
 # A simplistic Robots.txt
 airflow/www/static/robots.txt
+
+# Generated autocomplete files
+dev/breeze/autocomplete/*
