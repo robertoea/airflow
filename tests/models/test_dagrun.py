@@ -37,7 +37,6 @@ from airflow.operators.python import ShortCircuitOperator
 from airflow.serialization.serialized_objects import SerializedDAG
 from airflow.stats import Stats
 from airflow.utils import timezone
-from airflow.utils.dates import days_ago
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.types import DagRunType
@@ -191,6 +190,29 @@ class TestDagRun:
             'test_short_circuit_false': TaskInstanceState.SUCCESS,
             'test_state_skipped1': TaskInstanceState.SKIPPED,
             'test_state_skipped2': TaskInstanceState.SKIPPED,
+        }
+
+        dag_run = self.create_dag_run(dag=dag, task_states=initial_task_states, session=session)
+        dag_run.update_state()
+        assert DagRunState.SUCCESS == dag_run.state
+
+    def test_dagrun_not_stuck_in_running_when_all_tasks_instances_are_removed(self, session):
+        """
+        Tests that a DAG run succeeds when all tasks are removed
+        """
+        dag = DAG(dag_id='test_dagrun_success_when_all_skipped', start_date=timezone.datetime(2017, 1, 1))
+        dag_task1 = ShortCircuitOperator(
+            task_id='test_short_circuit_false', dag=dag, python_callable=lambda: False
+        )
+        dag_task2 = EmptyOperator(task_id='test_state_skipped1', dag=dag)
+        dag_task3 = EmptyOperator(task_id='test_state_skipped2', dag=dag)
+        dag_task1.set_downstream(dag_task2)
+        dag_task2.set_downstream(dag_task3)
+
+        initial_task_states = {
+            'test_short_circuit_false': TaskInstanceState.REMOVED,
+            'test_state_skipped1': TaskInstanceState.REMOVED,
+            'test_state_skipped2': TaskInstanceState.REMOVED,
         }
 
         dag_run = self.create_dag_run(dag=dag, task_states=initial_task_states, session=session)
@@ -785,7 +807,7 @@ class TestDagRun:
         Tests that dag scheduling delay stat is not called if the dagrun is not a scheduled run.
         This case is manual run. Simple test for coherence check.
         """
-        dag = DAG(dag_id='test_dagrun_stats', start_date=days_ago(1))
+        dag = DAG(dag_id='test_dagrun_stats', start_date=DEFAULT_DATE)
         dag_task = EmptyOperator(task_id='dummy', dag=dag)
 
         initial_task_states = {
@@ -809,7 +831,7 @@ class TestDagRun:
         Tests that dag scheduling delay stat is set properly once running scheduled dag.
         dag_run.update_state() invokes the _emit_true_scheduling_delay_stats_for_finished_state method.
         """
-        dag = DAG(dag_id='test_emit_dag_stats', start_date=days_ago(1), schedule_interval=schedule_interval)
+        dag = DAG(dag_id='test_emit_dag_stats', start_date=DEFAULT_DATE, schedule_interval=schedule_interval)
         dag_task = EmptyOperator(task_id='dummy', dag=dag, owner='airflow')
 
         try:
@@ -860,7 +882,7 @@ class TestDagRun:
         """
         Tests that adding State.failed_states and State.success_states work as expected.
         """
-        dag = DAG(dag_id='test_dagrun_states', start_date=days_ago(1))
+        dag = DAG(dag_id='test_dagrun_states', start_date=DEFAULT_DATE)
         dag_task_success = EmptyOperator(task_id='dummy', dag=dag)
         dag_task_failed = EmptyOperator(task_id='dummy2', dag=dag)
 
@@ -1055,14 +1077,18 @@ def test_ti_scheduling_mapped_zero_length(dag_maker, session):
         mapped = MockOperator.partial(task_id='task_2').expand(arg2=XComArg(task))
 
     dr: DagRun = dag_maker.create_dagrun()
-    ti1, _ = sorted(dr.task_instances, key=lambda ti: ti.task_id)
+    ti1, ti2 = sorted(dr.task_instances, key=lambda ti: ti.task_id)
     ti1.state = TaskInstanceState.SUCCESS
     session.add(
         TaskMap(dag_id=dr.dag_id, task_id=ti1.task_id, run_id=dr.run_id, map_index=-1, length=0, keys=None)
     )
     session.flush()
 
-    dr.task_instance_scheduling_decisions(session=session)
+    decision = dr.task_instance_scheduling_decisions(session=session)
+
+    # ti1 finished execution. ti2 goes directly to finished state because it's
+    # expanded against a zero-length XCom.
+    assert decision.finished_tis == [ti1, ti2]
 
     indices = (
         session.query(TI.map_index, TI.state)
@@ -1157,3 +1183,24 @@ def test_mapped_task_all_finish_before_downstream(dag_maker, session):
     decision = dr.task_instance_scheduling_decisions(session=session)
     assert decision.schedulable_tis == []
     assert result == [2, 4]
+
+
+def test_schedule_tis_map_index(dag_maker, session):
+    with dag_maker(session=session, dag_id="test"):
+        task = BaseOperator(task_id='task_1')
+
+    dr = DagRun(dag_id="test", run_id="test", run_type=DagRunType.MANUAL)
+    ti0 = TI(task=task, run_id=dr.run_id, map_index=0, state=TaskInstanceState.SUCCESS)
+    ti1 = TI(task=task, run_id=dr.run_id, map_index=1, state=None)
+    ti2 = TI(task=task, run_id=dr.run_id, map_index=2, state=TaskInstanceState.SUCCESS)
+    session.add_all((dr, ti0, ti1, ti2))
+    session.flush()
+
+    assert dr.schedule_tis((ti1,), session=session) == 1
+
+    session.refresh(ti0)
+    session.refresh(ti1)
+    session.refresh(ti2)
+    assert ti0.state == TaskInstanceState.SUCCESS
+    assert ti1.state == TaskInstanceState.SCHEDULED
+    assert ti2.state == TaskInstanceState.SUCCESS

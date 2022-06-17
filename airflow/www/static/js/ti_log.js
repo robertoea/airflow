@@ -17,7 +17,7 @@
  * under the License.
  */
 
-/* global document, window, $, moment, Airflow */
+/* global document, window, $ */
 import { escapeHtml } from './main';
 import { getMetaValue } from './utils';
 import { formatDateTime } from './datetime_utils';
@@ -33,7 +33,7 @@ const ANIMATION_SPEED = parseInt(getMetaValue('animation_speed'), 10);
 const TOTAL_ATTEMPTS = parseInt(getMetaValue('total_attempts'), 10);
 
 function recurse(delay = DELAY) {
-  return new Promise((resolve) => setTimeout(resolve, delay));
+  return new Promise((resolve) => { setTimeout(resolve, delay); });
 }
 
 // Enable auto tailing only when users scroll down to the bottom
@@ -118,10 +118,9 @@ function autoTailingLog(tryNumber, metadata = null, autoTailing = false) {
 
         // The message may contain HTML, so either have to escape it or write it as text.
         const escapedMessage = escapeHtml(item[1]);
-        const tzOffset = moment().tz(Airflow.serverTimezone).format('Z');
         const linkifiedMessage = escapedMessage
           .replace(urlRegex, (url) => `<a href="${url}" target="_blank">${url}</a>`)
-          .replaceAll(dateRegex, (date) => `<time datetime="${date}${tzOffset}">${formatDateTime(`${date}${tzOffset}`)}</time>`);
+          .replaceAll(dateRegex, (date) => `<time datetime="${date}+00:00" data-with-tz="true">${formatDateTime(`${date}+00:00`)}</time>`);
         logBlock.innerHTML += `${linkifiedMessage}\n`;
       });
 
@@ -135,9 +134,7 @@ function autoTailingLog(tryNumber, metadata = null, autoTailing = false) {
       document.getElementById(`loading-${tryNumber}`).style.display = 'none';
       return;
     }
-    recurse().then(() => autoTailingLog(
-      tryNumber, res.metadata, autoTailing,
-    ));
+    recurse().then(() => autoTailingLog(tryNumber, res.metadata, autoTailing));
   });
 }
 

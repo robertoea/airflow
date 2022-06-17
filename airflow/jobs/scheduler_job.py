@@ -28,7 +28,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Collection, DefaultDict, Dict, Iterator, List, Optional, Set, Tuple
 
-from sqlalchemy import and_, func, not_, or_, text, tuple_
+from sqlalchemy import func, not_, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only, selectinload
 from sqlalchemy.orm.session import Session, make_transient
@@ -55,7 +55,13 @@ from airflow.utils.docs import get_docs_url
 from airflow.utils.event_scheduler import EventScheduler
 from airflow.utils.retries import MAX_DB_RETRIES, retry_db_transaction, run_with_db_retries
 from airflow.utils.session import create_session, provide_session
-from airflow.utils.sqlalchemy import is_lock_not_available_error, prohibit_commit, skip_locked, with_row_locks
+from airflow.utils.sqlalchemy import (
+    is_lock_not_available_error,
+    prohibit_commit,
+    skip_locked,
+    tuple_in_condition,
+    with_row_locks,
+)
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 from airflow.utils.types import DagRunType
 
@@ -136,17 +142,21 @@ class SchedulerJob(BaseJob):
             self._log = log
 
         # Check what SQL backend we use
-        sql_conn: str = conf.get('database', 'sql_alchemy_conn').lower()
+        sql_conn: str = conf.get_mandatory_value('database', 'sql_alchemy_conn').lower()
         self.using_sqlite = sql_conn.startswith('sqlite')
         self.using_mysql = sql_conn.startswith('mysql')
         # Dag Processor agent - not used in Dag Processor standalone mode.
         self.processor_agent: Optional[DagFileProcessorAgent] = None
 
         self.dagbag = DagBag(dag_folder=self.subdir, read_dags_from_db=True, load_op_links=False)
+        self._paused_dag_without_running_dagruns: Set = set()
 
         if conf.getboolean('smart_sensor', 'use_smart_sensor'):
             compatible_sensors = set(
-                map(lambda l: l.strip(), conf.get('smart_sensor', 'sensors_enabled').split(','))
+                map(
+                    lambda l: l.strip(),
+                    conf.get_mandatory_value('smart_sensor', 'sensors_enabled').split(','),
+                )
             )
             docs_url = get_docs_url('concepts/smart-sensors.html#migrating-to-deferrable-operators')
             warnings.warn(
@@ -267,7 +277,7 @@ class SchedulerJob(BaseJob):
 
         # If the pools are full, there is no point doing anything!
         # If _somehow_ the pool is overfull, don't let the limit go negative - it breaks SQL
-        pool_slots_free = max(0, sum(pool['open'] for pool in pools.values()))
+        pool_slots_free = sum(max(0, pool['open']) for pool in pools.values())
 
         if pool_slots_free == 0:
             self.log.debug("All pools are full!")
@@ -321,17 +331,7 @@ class SchedulerJob(BaseJob):
                 query = query.filter(not_(TI.dag_id.in_(starved_dags)))
 
             if starved_tasks:
-                if settings.engine.dialect.name == 'mssql':
-                    task_filter = or_(
-                        and_(
-                            TaskInstance.dag_id == dag_id,
-                            TaskInstance.task_id == task_id,
-                        )
-                        for (dag_id, task_id) in starved_tasks
-                    )
-                else:
-                    task_filter = tuple_(TaskInstance.dag_id, TaskInstance.task_id).in_(starved_tasks)
-
+                task_filter = tuple_in_condition((TaskInstance.dag_id, TaskInstance.task_id), starved_tasks)
                 query = query.filter(not_(task_filter))
 
             query = query.limit(max_tis)
@@ -553,9 +553,9 @@ class SchedulerJob(BaseJob):
                 queue=queue,
             )
 
-    def _critical_section_execute_task_instances(self, session: Session) -> int:
+    def _critical_section_enqueue_task_instances(self, session: Session) -> int:
         """
-        Attempts to execute TaskInstances that should be executed by the scheduler.
+        Enqueues TaskInstances for execution.
 
         There are three steps:
         1. Pick TIs by priority with the constraint that they are in the expected states
@@ -768,6 +768,26 @@ class SchedulerJob(BaseJob):
                     self.log.exception("Exception when executing DagFileProcessorAgent.end")
             self.log.info("Exited execute loop")
 
+    def _update_dag_run_state_for_paused_dags(self):
+        try:
+            paused_dag_ids = DagModel.get_all_paused_dag_ids()
+            for dag_id in paused_dag_ids:
+                if dag_id in self._paused_dag_without_running_dagruns:
+                    continue
+
+                dag = SerializedDagModel.get_dag(dag_id)
+                if dag is None:
+                    continue
+                dag_runs = DagRun.find(dag_id=dag_id, state=State.RUNNING)
+                for dag_run in dag_runs:
+                    dag_run.dag = dag
+                    _, callback_to_run = dag_run.update_state(execute_callbacks=False)
+                    if callback_to_run:
+                        self._send_dag_callbacks_to_processor(dag, callback_to_run)
+                self._paused_dag_without_running_dagruns.add(dag_id)
+        except Exception as e:  # should not fail the scheduler
+            self.log.exception('Failed to update dag run state for paused dags due to %s', str(e))
+
     def _run_scheduler_loop(self) -> None:
         """
         The actual scheduler loop. The main steps in the loop are:
@@ -813,6 +833,7 @@ class SchedulerJob(BaseJob):
             conf.getfloat('scheduler', 'zombie_detection_interval', fallback=10.0),
             self._find_zombies,
         )
+        timers.call_regular_interval(60.0, self._update_dag_run_state_for_paused_dags)
 
         for loop_count in itertools.count(start=1):
             with Stats.timer() as timer:
@@ -881,7 +902,7 @@ class SchedulerJob(BaseJob):
 
           By "next oldest", we mean hasn't been examined/scheduled in the most time.
 
-          The reason we don't select all dagruns at once because the rows are selected with row locks, meaning
+          We don't select all dagruns at once, because the rows are selected with row locks, meaning
           that only one scheduler can "process them", even it is waiting behind other dags. Increasing this
           limit will allow more throughput for smaller DAGs but will likely slow down throughput for larger
           (>500 tasks.) DAGs
@@ -889,7 +910,7 @@ class SchedulerJob(BaseJob):
         - Then, via a Critical Section (locking the rows of the Pool model) we queue tasks, and then send them
           to the executor.
 
-          See docs of _critical_section_execute_task_instances for more.
+          See docs of _critical_section_enqueue_task_instances for more.
 
         :return: Number of TIs enqueued in this iteration
         :rtype: int
@@ -937,7 +958,7 @@ class SchedulerJob(BaseJob):
                     timer.start()
 
                     # Find anything TIs in state SCHEDULED, try to QUEUE it (send it to the executor)
-                    num_queued_tis = self._critical_section_execute_task_instances(session=session)
+                    num_queued_tis = self._critical_section_enqueue_task_instances(session=session)
 
                     # Make sure we only sent this metric if we obtained the lock, otherwise we'll skew the
                     # metric, way down
@@ -980,24 +1001,15 @@ class SchedulerJob(BaseJob):
         # as DagModel.dag_id and DagModel.next_dagrun
         # This list is used to verify if the DagRun already exist so that we don't attempt to create
         # duplicate dag runs
-
-        if session.bind.dialect.name == 'mssql':
-            existing_dagruns_filter = or_(
-                *(
-                    and_(
-                        DagRun.dag_id == dm.dag_id,
-                        DagRun.execution_date == dm.next_dagrun,
-                    )
-                    for dm in dag_models
-                )
-            )
-        else:
-            existing_dagruns_filter = tuple_(DagRun.dag_id, DagRun.execution_date).in_(
-                [(dm.dag_id, dm.next_dagrun) for dm in dag_models]
-            )
-
         existing_dagruns = (
-            session.query(DagRun.dag_id, DagRun.execution_date).filter(existing_dagruns_filter).all()
+            session.query(DagRun.dag_id, DagRun.execution_date)
+            .filter(
+                tuple_in_condition(
+                    (DagRun.dag_id, DagRun.execution_date),
+                    ((dm.dag_id, dm.next_dagrun) for dm in dag_models),
+                ),
+            )
+            .all()
         )
 
         active_runs_of_dags = defaultdict(

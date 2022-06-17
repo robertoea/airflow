@@ -16,14 +16,13 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-
+import fnmatch
 import os
 import re
 import sys
 import warnings
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, List, Optional, Sequence, Set, Union
-from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from airflow.utils.context import Context
@@ -100,18 +99,8 @@ class S3KeySensor(BaseSensorOperator):
         self.verify = verify
         self.hook: Optional[S3Hook] = None
 
-    def _resolve_bucket_and_key(self, key):
-        """If key is URI, parse bucket"""
-        if self.bucket_name is None:
-            return S3Hook.parse_s3_url(key)
-        else:
-            parsed_url = urlparse(key)
-            if parsed_url.scheme != '' or parsed_url.netloc != '':
-                raise AirflowException('If bucket_name provided, bucket_key must be relative path, not URI.')
-            return self.bucket_name, key
-
     def _check_key(self, key):
-        bucket_name, key = self._resolve_bucket_and_key(key)
+        bucket_name, key = S3Hook.get_s3_bucket_key(self.bucket_name, key, 'bucket_name', 'bucket_key')
         self.log.info('Poking for key : s3://%s/%s', bucket_name, key)
 
         """
@@ -123,12 +112,13 @@ class S3KeySensor(BaseSensorOperator):
         """
         if self.wildcard_match:
             prefix = re.split(r'[\[\*\?]', key, 1)[0]
-            files = self.get_hook().get_file_metadata(prefix, bucket_name)
-            if len(files) == 0:
+            keys = self.get_hook().get_file_metadata(prefix, bucket_name)
+            key_matches = [k for k in keys if fnmatch.fnmatch(k['Key'], key)]
+            if len(key_matches) == 0:
                 return False
 
             # Reduce the set of metadata to size only
-            files = list(map(lambda f: {'Size': f['Size']}, files))
+            files = list(map(lambda f: {'Size': f['Size']}, key_matches))
         else:
             obj = self.get_hook().head_object(key, bucket_name)
             if obj is None:
@@ -166,7 +156,7 @@ class S3KeySizeSensor(S3KeySensor):
     ):
         warnings.warn(
             """
-            S3PrefixSensor is deprecated.
+            S3KeySizeSensor is deprecated.
             Please use `airflow.providers.amazon.aws.sensors.s3.S3KeySensor`.
             """,
             DeprecationWarning,
@@ -194,6 +184,10 @@ class S3KeysUnchangedSensor(BaseSensorOperator):
     increase in the number of objects. Note, this sensor will not behave correctly
     in reschedule mode, as the state of the listed objects in the S3 bucket will
     be lost between rescheduled invocations.
+
+    .. seealso::
+        For more information on how to use this sensor, take a look at the guide:
+        :ref:`howto/sensor:S3KeysUnchangedSensor`
 
     :param bucket_name: Name of the S3 bucket
     :param prefix: The prefix being waited on. Relative path from bucket root level.
@@ -348,8 +342,7 @@ class S3PrefixSensor(S3KeySensor):
             stacklevel=2,
         )
 
-        self.prefix = prefix
-        prefixes = [self.prefix] if isinstance(self.prefix, str) else self.prefix
+        prefixes = [prefix] if isinstance(prefix, str) else prefix
         keys = [pref if pref.endswith(delimiter) else pref + delimiter for pref in prefixes]
 
         super().__init__(bucket_key=keys, **kwargs)

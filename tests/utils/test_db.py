@@ -96,6 +96,7 @@ class TestDb:
 
     def test_check_migrations(self):
         # Should run without error. Can't easily test the behaviour, but we can check it works
+        check_migrations(0)
         check_migrations(1)
 
     @mock.patch('alembic.command')
@@ -136,6 +137,17 @@ class TestDb:
             with mock.patch('alembic.command.upgrade') as mock_alembic_upgrade:
                 upgradedb(from_revision=from_revision, to_revision=to_revision, show_sql_only=True)
         mock_alembic_upgrade.assert_called_once_with(mock.ANY, f"{from_revision}:{to_revision}", sql=True)
+
+    @mock.patch('airflow.utils.db._offline_migration')
+    @mock.patch('airflow.utils.db._get_current_revision')
+    def test_offline_upgrade_no_versions(self, mock_gcr, mock_om):
+        """Offline upgrade should work with no version / revision options."""
+        with mock.patch('airflow.utils.db.settings.engine.dialect') as dialect:
+            dialect.name = "postgresql"  # offline migration not supported with postgres
+            mock_gcr.return_value = '90d1635d7b86'
+            upgradedb(from_revision=None, to_revision=None, show_sql_only=True)
+            actual = mock_om.call_args[0][2]
+            assert re.match(r'90d1635d7b86:[a-z0-9]+', actual) is not None
 
     def test_offline_upgrade_fails_for_migration_less_than_2_0_0_head(self):
         with mock.patch('airflow.utils.db.settings.engine.dialect'):

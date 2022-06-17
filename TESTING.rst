@@ -168,19 +168,34 @@ to breeze.
 
 .. code-block:: bash
 
-     ./breeze-legacy tests tests/providers/http/hooks/test_http.py tests/core/test_core.py --db-reset -- --log-cli-level=DEBUG
+     breeze tests tests/providers/http/hooks/test_http.py tests/core/test_core.py --db-reset --log-cli-level=DEBUG
 
 You can run the whole test suite without adding the test target:
 
 .. code-block:: bash
 
-    ./breeze-legacy tests --db-reset
+    breeze tests --db-reset
 
 You can also specify individual tests or a group of tests:
 
 .. code-block:: bash
 
-    ./breeze-legacy tests --db-reset tests/core/test_core.py::TestCore
+    breeze tests --db-reset tests/core/test_core.py::TestCore
+
+You can also limit the tests to execute to specific group of tests
+
+.. code-block:: bash
+
+    breeze tests --test-type Core
+
+
+You can also write tests in "limited progress" mode (useful in the future to run CI). In this mode each
+test just prints "percentage" summary of the run as single line and only dumps full output of the test
+after it completes.
+
+.. code-block:: bash
+
+    breeze tests --test-type Core --limit-progress-output
 
 
 Running Tests of a specified type from the Host
@@ -559,7 +574,7 @@ need to run the following steps:
 
 .. code-block:: bash
 
-     ./breeze-legacy prepare-provider-packages [PACKAGE ...]
+     breeze prepare-provider-packages [PACKAGE ...]
 
 If you run this command without packages, you will prepare all packages. However, You can specify
 providers that you would like to build if you just want to build few provider packages.
@@ -570,7 +585,7 @@ before running, so you should run it before generating ``apache-airflow`` packag
 
 .. code-block:: bash
 
-     ./breeze-legacy prepare-airflow-packages
+     breeze prepare-airflow-package
 
 This prepares airflow .whl package in the dist folder.
 
@@ -1034,6 +1049,7 @@ Currently forwarded credentials are:
   * credentials stored in ``${HOME}/.azure`` for ``az`` - Microsoft Azure client
   * credentials stored in ``${HOME}/.config`` for ``gcloud`` - Google Cloud client (among others)
   * credentials stored in ``${HOME}/.docker`` for ``docker`` client
+  * credentials stored in ``${HOME}/.snowsql`` for ``snowsql`` - SnowSQL (Snowflake CLI client)
 
 Adding a New System Test
 --------------------------
@@ -1085,7 +1101,7 @@ example, the below command will build google, postgres and mysql wheel packages:
 
 .. code-block:: bash
 
-  ./breeze-legacy prepare-provider-packages -- google postgres mysql
+  breeze prepare-provider-packages google postgres mysql
 
 Those packages will be prepared in ./dist folder. This folder is mapped to /dist folder
 when you enter Breeze, so it is easy to automate installing those packages for testing.
@@ -1156,7 +1172,7 @@ Breeze session. They are usually expensive to run.
 .. code-block:: bash
 
     breeze stop
-    breeze --python 3.6 --db-reset --forward-credentials
+    breeze --python 3.7 --db-reset --forward-credentials
 
 2. Run create action in helper (to create slowly created resources):
 

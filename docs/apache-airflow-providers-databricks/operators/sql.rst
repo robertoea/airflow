@@ -29,36 +29,17 @@ on a `Databricks SQL endpoint  <https://docs.databricks.com/sql/admin/sql-endpoi
 Using the Operator
 ------------------
 
-Operator executes given SQL queries against configured endpoint.  There are 3 ways of specifying SQL queries:
+Operator executes given SQL queries against configured endpoint. The only required parameters are:
 
-1. Simple string with SQL statement.
-2. List of strings representing SQL statements.
-3. Name of the file with SQL queries. File must have ``.sql`` extension. Each query should finish with ``;<new_line>``
+* ``sql`` - SQL queries to execute. There are 3 ways of specifying SQL queries:
 
-.. list-table::
-   :widths: 15 25
-   :header-rows: 1
+  1. Simple string with SQL statement.
+  2. List of strings representing SQL statements.
+  3. Name of the file with SQL queries. File must have ``.sql`` extension. Each query should finish with ``;<new_line>``
 
-   * - Parameter
-     - Input
-   * - sql: str or list[str]
-     - Required parameter specifying a queries to execute.
-   * - sql_endpoint_name: str
-     - Optional name of Databricks SQL endpoint to use. If not specified, ``http_path`` should be provided.
-   * - http_path: str
-     - Optional HTTP path for Databricks SQL endpoint or Databricks cluster. If not specified, it should be provided in Databricks connection, or the ``sql_endpoint_name`` parameter must be set.
-   * - parameters: dict[str, any]
-     - Optional parameters that will be used to substitute variable(s) in SQL query.
-   * - session_configuration: dict[str,str]
-     - optional dict specifying Spark configuration parameters that will be set for the session.
-   * - output_path: str
-     - Optional path to the file to which results will be written.
-   * - output_format: str
-     - Name of the format which will be used to write results.  Supported values are (case-insensitive): ``JSON`` (array of JSON objects), ``JSONL`` (each row as JSON object on a separate line), ``CSV`` (default).
-   * - csv_params: dict[str, any]
-     - Optional dictionary with parameters to customize Python CSV writer.
-   * - do_xcom_push: boolean
-     - whether we should push query results (last query if multiple queries are provided) to xcom. Default: false
+* One of ``sql_endpoint_name`` (name of Databricks SQL endpoint to use) or ``http_path`` (HTTP path for Databricks SQL endpoint or Databricks cluster).
+
+Other parameters are optional and could be found in the class documentation.
 
 Examples
 --------
@@ -68,7 +49,7 @@ Selecting data
 
 An example usage of the DatabricksSqlOperator to select data from a table is as follows:
 
-.. exampleinclude:: /../../airflow/providers/databricks/example_dags/example_databricks_sql.py
+.. exampleinclude:: /../../tests/system/providers/databricks/example_databricks_sql.py
     :language: python
     :start-after: [START howto_operator_databricks_sql_select]
     :end-before: [END howto_operator_databricks_sql_select]
@@ -78,7 +59,7 @@ Selecting data into a file
 
 An example usage of the DatabricksSqlOperator to select data from a table and store in a file is as follows:
 
-.. exampleinclude:: /../../airflow/providers/databricks/example_dags/example_databricks_sql.py
+.. exampleinclude:: /../../tests/system/providers/databricks/example_databricks_sql.py
     :language: python
     :start-after: [START howto_operator_databricks_sql_select_file]
     :end-before: [END howto_operator_databricks_sql_select_file]
@@ -88,7 +69,7 @@ Executing multiple statements
 
 An example usage of the DatabricksSqlOperator to perform multiple SQL statements is as follows:
 
-.. exampleinclude:: /../../airflow/providers/databricks/example_dags/example_databricks_sql.py
+.. exampleinclude:: /../../tests/system/providers/databricks/example_databricks_sql.py
     :language: python
     :start-after: [START howto_operator_databricks_sql_multiple]
     :end-before: [END howto_operator_databricks_sql_multiple]
@@ -99,7 +80,7 @@ Executing multiple statements from a file
 
 An example usage of the DatabricksSqlOperator to perform statements from a file is as follows:
 
-.. exampleinclude:: /../../airflow/providers/databricks/example_dags/example_databricks_sql.py
+.. exampleinclude:: /../../tests/system/providers/databricks/example_databricks_sql.py
     :language: python
     :start-after: [START howto_operator_databricks_sql_multiple_file]
     :end-before: [END howto_operator_databricks_sql_multiple_file]

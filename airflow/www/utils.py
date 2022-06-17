@@ -36,7 +36,6 @@ from pendulum.datetime import DateTime
 from pygments import highlight, lexers
 from pygments.formatters import HtmlFormatter
 from sqlalchemy.ext.associationproxy import AssociationProxy
-from sqlalchemy.orm import Session
 
 from airflow import models
 from airflow.models import errors
@@ -64,6 +63,7 @@ def get_mapped_instances(task_instance, session):
             TaskInstance.run_id == task_instance.run_id,
             TaskInstance.task_id == task_instance.task_id,
         )
+        .order_by(TaskInstance.map_index)
         .all()
     )
 
@@ -111,10 +111,11 @@ def get_mapped_summary(parent_instance, task_instances):
     )
 
     try_count = (
-        parent_instance.prev_attempted_tries
-        if parent_instance.prev_attempted_tries != 0
-        else parent_instance.try_number
+        parent_instance._try_number
+        if parent_instance._try_number != 0 or parent_instance.state in State.running
+        else parent_instance._try_number + 1
     )
+
     return {
         'task_id': parent_instance.task_id,
         'run_id': parent_instance.run_id,
@@ -122,32 +123,6 @@ def get_mapped_summary(parent_instance, task_instances):
         'start_date': group_start_date,
         'end_date': group_end_date,
         'mapped_states': mapped_states,
-        'try_number': try_count,
-    }
-
-
-def encode_ti(
-    task_instance: Optional[TaskInstance], is_mapped: Optional[bool], session: Optional[Session]
-) -> Optional[Dict[str, Any]]:
-    if not task_instance:
-        return None
-
-    if is_mapped:
-        return get_mapped_summary(task_instance, task_instances=get_mapped_instances(task_instance, session))
-
-    try_count = (
-        task_instance.prev_attempted_tries
-        if task_instance.prev_attempted_tries != 0
-        else task_instance.try_number
-    )
-    return {
-        'task_id': task_instance.task_id,
-        'run_id': task_instance.run_id,
-        'map_index': task_instance.map_index,
-        'state': task_instance.state,
-        'duration': task_instance.duration,
-        'start_date': datetime_to_string(task_instance.start_date),
-        'end_date': datetime_to_string(task_instance.end_date),
         'try_number': try_count,
     }
 

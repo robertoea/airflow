@@ -30,6 +30,7 @@ from typing import (
     Dict,
     FrozenSet,
     Iterable,
+    Iterator,
     List,
     Optional,
     Sequence,
@@ -48,6 +49,7 @@ from airflow import settings
 from airflow.compat.functools import cache, cached_property
 from airflow.exceptions import AirflowException, UnmappableOperator
 from airflow.models.abstractoperator import (
+    DEFAULT_IGNORE_FIRST_DEPENDS_ON_PAST,
     DEFAULT_OWNER,
     DEFAULT_POOL_SLOTS,
     DEFAULT_PRIORITY_WEIGHT,
@@ -76,6 +78,7 @@ if TYPE_CHECKING:
 
     from airflow.models.baseoperator import BaseOperator, BaseOperatorLink
     from airflow.models.dag import DAG
+    from airflow.models.operator import Operator
     from airflow.models.taskinstance import TaskInstance
     from airflow.models.xcom_arg import XComArg
     from airflow.utils.task_group import TaskGroup
@@ -189,12 +192,17 @@ class OperatorPartial:
             warnings.warn(f"Task {task_id} was never mapped!")
 
     def expand(self, **mapped_kwargs: "Mappable") -> "MappedOperator":
+        if not mapped_kwargs:
+            raise TypeError("no arguments to expand against")
+        return self._expand(**mapped_kwargs)
+
+    def _expand(self, **mapped_kwargs: "Mappable") -> "MappedOperator":
         self._expand_called = True
 
         from airflow.operators.empty import EmptyOperator
 
         validate_mapping_kwargs(self.operator_class, "expand", mapped_kwargs)
-        prevent_duplicates(self.kwargs, mapped_kwargs, fail_reason="mapping already partial")
+        prevent_duplicates(self.kwargs, mapped_kwargs, fail_reason="unmappable or already specified")
         ensure_xcomarg_return_value(mapped_kwargs)
 
         partial_kwargs = self.kwargs.copy()
@@ -298,8 +306,7 @@ class MappedOperator(AbstractOperator):
         if self.dag:
             self.dag.add_task(self)
         for k, v in self.mapped_kwargs.items():
-            if k in self.template_fields:
-                XComArg.apply_upstream_relationship(self, v)
+            XComArg.apply_upstream_relationship(self, v)
         for k, v in self.partial_kwargs.items():
             if k in self.template_fields:
                 XComArg.apply_upstream_relationship(self, v)
@@ -382,6 +389,11 @@ class MappedOperator(AbstractOperator):
         return bool(self.partial_kwargs.get("depends_on_past"))
 
     @property
+    def ignore_first_depends_on_past(self) -> bool:
+        value = self.partial_kwargs.get("ignore_first_depends_on_past", DEFAULT_IGNORE_FIRST_DEPENDS_ON_PAST)
+        return bool(value)
+
+    @property
     def wait_for_downstream(self) -> bool:
         return bool(self.partial_kwargs.get("wait_for_downstream"))
 
@@ -404,6 +416,10 @@ class MappedOperator(AbstractOperator):
     @property
     def execution_timeout(self) -> Optional[datetime.timedelta]:
         return self.partial_kwargs.get("execution_timeout")
+
+    @property
+    def max_retry_delay(self) -> Optional[datetime.timedelta]:
+        return self.partial_kwargs.get("max_retry_delay")
 
     @property
     def retry_delay(self) -> datetime.timedelta:
@@ -465,6 +481,26 @@ class MappedOperator(AbstractOperator):
     def outlets(self) -> Optional[Any]:
         return self.partial_kwargs.get("outlets", None)
 
+    @property
+    def doc(self) -> Optional[str]:
+        return self.partial_kwargs.get("doc")
+
+    @property
+    def doc_md(self) -> Optional[str]:
+        return self.partial_kwargs.get("doc_md")
+
+    @property
+    def doc_json(self) -> Optional[str]:
+        return self.partial_kwargs.get("doc_json")
+
+    @property
+    def doc_yaml(self) -> Optional[str]:
+        return self.partial_kwargs.get("doc_yaml")
+
+    @property
+    def doc_rst(self) -> Optional[str]:
+        return self.partial_kwargs.get("doc_rst")
+
     def get_dag(self) -> Optional["DAG"]:
         """Implementing Operator."""
         return self.dag
@@ -474,7 +510,6 @@ class MappedOperator(AbstractOperator):
         return DagAttributeTypes.OP, self.task_id
 
     def _get_unmap_kwargs(self) -> Dict[str, Any]:
-
         return {
             "task_id": self.task_id,
             "dag": self.dag,
@@ -620,7 +655,7 @@ class MappedOperator(AbstractOperator):
             .one_or_none()
         )
 
-        ret: List[TaskInstance] = []
+        all_expanded_tis: List[TaskInstance] = []
 
         if unmapped_ti:
             # The unmapped task instance still exists and is unfinished, i.e. we
@@ -634,14 +669,13 @@ class MappedOperator(AbstractOperator):
                     total_length,
                 )
                 unmapped_ti.state = TaskInstanceState.SKIPPED
-                session.flush()
-                return ret, 0
-            # Otherwise convert this into the first mapped index, and create
-            # TaskInstance for other indexes.
-            unmapped_ti.map_index = 0
+            else:
+                # Otherwise convert this into the first mapped index, and create
+                # TaskInstance for other indexes.
+                unmapped_ti.map_index = 0
+                self.log.debug("Updated in place to become %s", unmapped_ti)
+                all_expanded_tis.append(unmapped_ti)
             state = unmapped_ti.state
-            self.log.debug("Updated in place to become %s", unmapped_ti)
-            ret.append(unmapped_ti)
             indexes_to_map = range(1, total_length)
         else:
             # Only create "missing" ones.
@@ -658,13 +692,12 @@ class MappedOperator(AbstractOperator):
 
         for index in indexes_to_map:
             # TODO: Make more efficient with bulk_insert_mappings/bulk_save_mappings.
-            # TODO: Change `TaskInstance` ctor to take Operator, not BaseOperator
-            ti = TaskInstance(self, run_id=run_id, map_index=index, state=state)  # type: ignore
+            ti = TaskInstance(self, run_id=run_id, map_index=index, state=state)
             self.log.debug("Expanding TIs upserted %s", ti)
             task_instance_mutation_hook(ti)
             ti = session.merge(ti)
-            ti.task = self
-            ret.append(ti)
+            ti.refresh_from_task(self)  # session.merge() loses task information.
+            all_expanded_tis.append(ti)
 
         # Set to "REMOVED" any (old) TaskInstances with map indices greater
         # than the current map value
@@ -676,8 +709,7 @@ class MappedOperator(AbstractOperator):
         ).update({TaskInstance.state: TaskInstanceState.REMOVED})
 
         session.flush()
-
-        return ret, total_length
+        return all_expanded_tis, total_length
 
     def prepare_for_execution(self) -> "MappedOperator":
         # Since a mapped operator cannot be used for execution, and an unmapped
@@ -775,6 +807,13 @@ class MappedOperator(AbstractOperator):
                 return k, v
         raise IndexError(f"index {map_index} is over mapped length")
 
+    def iter_mapped_dependencies(self) -> Iterator["Operator"]:
+        """Upstream dependencies that provide XComs used by this task for task mapping."""
+        from airflow.models.xcom_arg import XComArg
+
+        for ref in XComArg.iter_xcom_args(self._get_expansion_kwargs()):
+            yield ref.operator
+
     @cached_property
     def parse_time_mapped_ti_count(self) -> Optional[int]:
         """
@@ -789,7 +828,10 @@ class MappedOperator(AbstractOperator):
             if not isinstance(value, MAPPABLE_LITERAL_TYPES):
                 # None literal type encountered, so give up
                 return None
-            total += len(value)
+            if total == 0:
+                total = len(value)
+            else:
+                total *= len(value)
         return total
 
     @cache
@@ -801,7 +843,6 @@ class MappedOperator(AbstractOperator):
         :return: None if upstream tasks are not complete yet, or else total number of mapped TIs this task
             should have
         """
-
         lengths = self._get_map_lengths(run_id, session=session)
         expansion_kwargs = self._get_expansion_kwargs()
 

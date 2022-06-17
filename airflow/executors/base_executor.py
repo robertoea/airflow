@@ -17,7 +17,7 @@
 """Base executor - this is the base class for all the implemented executors."""
 import sys
 from collections import OrderedDict
-from typing import Any, Counter, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Counter, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from airflow.callbacks.base_callback_sink import BaseCallbackSink
 from airflow.callbacks.callback_requests import CallbackRequest
@@ -48,6 +48,9 @@ QueuedTaskInstanceType = Tuple[CommandType, int, Optional[str], TaskInstance]
 # Event_buffer dict value type
 # Tuple of: state, info
 EventBufferValueType = Tuple[Optional[str], Any]
+
+# Task tuple to send to be executed
+TaskTuple = Tuple[TaskInstanceKey, CommandType, Optional[str], Optional[Any]]
 
 
 class BaseExecutor(LoggingMixin):
@@ -186,6 +189,7 @@ class BaseExecutor(LoggingMixin):
         :param open_slots: Number of open slots
         """
         sorted_queue = self.order_queued_tasks_by_priority()
+        task_tuples = []
 
         for _ in range(min((open_slots, len(self.queued_tasks)))):
             key, (command, _, queue, ti) = sorted_queue.pop(0)
@@ -212,9 +216,16 @@ class BaseExecutor(LoggingMixin):
                 del self.attempts[key]
                 del self.queued_tasks[key]
             else:
-                del self.queued_tasks[key]
-                self.running.add(key)
-                self.execute_async(key=key, command=command, queue=queue, executor_config=ti.executor_config)
+                task_tuples.append((key, command, queue, ti.executor_config))
+
+        if task_tuples:
+            self._process_tasks(task_tuples)
+
+    def _process_tasks(self, task_tuples: List[TaskTuple]) -> None:
+        for key, command, queue, executor_config in task_tuples:
+            del self.queued_tasks[key]
+            self.execute_async(key=key, command=command, queue=queue, executor_config=executor_config)
+            self.running.add(key)
 
     def change_state(self, key: TaskInstanceKey, state: str, info=None) -> None:
         """
@@ -298,7 +309,7 @@ class BaseExecutor(LoggingMixin):
         """This method is called when the daemon receives a SIGTERM"""
         raise NotImplementedError()
 
-    def try_adopt_task_instances(self, tis: List[TaskInstance]) -> List[TaskInstance]:
+    def try_adopt_task_instances(self, tis: Sequence[TaskInstance]) -> Sequence[TaskInstance]:
         """
         Try to adopt running task instances that have been abandoned by a SchedulerJob dying.
 
@@ -306,7 +317,7 @@ class BaseExecutor(LoggingMixin):
         re-scheduling)
 
         :return: any TaskInstances that were unable to be adopted
-        :rtype: list[airflow.models.TaskInstance]
+        :rtype: Sequence[airflow.models.TaskInstance]
         """
         # By default, assume Executors cannot adopt tasks, so just say we failed to adopt anything.
         # Subclasses can do better!

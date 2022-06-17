@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Dict,
     Generator,
     Iterable,
@@ -30,6 +31,7 @@ from typing import (
     NamedTuple,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
     cast,
@@ -70,7 +72,7 @@ from airflow.utils import timezone
 from airflow.utils.helpers import is_container
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.sqlalchemy import UtcDateTime, nulls_first, skip_locked, with_row_locks
+from airflow.utils.sqlalchemy import UtcDateTime, nulls_first, skip_locked, tuple_in_condition, with_row_locks
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 from airflow.utils.types import NOTSET, ArgNotSet, DagRunType
 
@@ -540,7 +542,7 @@ class DagRun(Base, LoggingMixin):
                 )
 
         leaf_task_ids = {t.task_id for t in dag.leaves}
-        leaf_tis = [ti for ti in tis if ti.task_id in leaf_task_ids]
+        leaf_tis = [ti for ti in tis if ti.task_id in leaf_task_ids if ti.state != TaskInstanceState.REMOVED]
 
         # if all roots finished and at least one failed, the run failed
         if not unfinished_tis and any(leaf_ti.state in State.failed_states for leaf_ti in leaf_tis):
@@ -655,7 +657,18 @@ class DagRun(Base, LoggingMixin):
         if unfinished_tis:
             schedulable_tis = [ut for ut in unfinished_tis if ut.state in SCHEDULEABLE_STATES]
             self.log.debug("number of scheduleable tasks for %s: %s task(s)", self, len(schedulable_tis))
-            schedulable_tis, changed_tis = self._get_ready_tis(schedulable_tis, finished_tis, session)
+            schedulable_tis, changed_tis, expansion_happened = self._get_ready_tis(
+                schedulable_tis,
+                finished_tis,
+                session=session,
+            )
+
+            # During expansion we may change some tis into non-schedulable
+            # states, so we need to re-compute.
+            if expansion_happened:
+                new_unfinished_tis = [t for t in unfinished_tis if t.state in State.unfinished]
+                finished_tis.extend(t for t in unfinished_tis if t.state in State.finished)
+                unfinished_tis = new_unfinished_tis
 
         return TISchedulingDecision(
             tis=tis,
@@ -670,57 +683,51 @@ class DagRun(Base, LoggingMixin):
         schedulable_tis: List[TI],
         finished_tis: List[TI],
         session: Session,
-    ) -> Tuple[List[TI], bool]:
+    ) -> Tuple[List[TI], bool, bool]:
         old_states = {}
         ready_tis: List[TI] = []
         changed_tis = False
 
         if not schedulable_tis:
-            return ready_tis, changed_tis
+            return ready_tis, changed_tis, False
 
         # If we expand TIs, we need a new list so that we iterate over them too. (We can't alter
         # `schedulable_tis` in place and have the `for` loop pick them up
-        expanded_tis: List[TI] = []
+        additional_tis: List[TI] = []
         dep_context = DepContext(
             flag_upstream_failed=True,
             ignore_unmapped_tasks=True,  # Ignore this Dep, as we will expand it if we can.
             finished_tis=finished_tis,
         )
 
-        # Check dependencies
-        for schedulable in itertools.chain(schedulable_tis, expanded_tis):
-
+        # Check dependencies.
+        expansion_happened = False
+        for schedulable in itertools.chain(schedulable_tis, additional_tis):
             old_state = schedulable.state
-            if schedulable.are_dependencies_met(session=session, dep_context=dep_context):
-                ready_tis.append(schedulable)
-            else:
+            if not schedulable.are_dependencies_met(session=session, dep_context=dep_context):
                 old_states[schedulable.key] = old_state
                 continue
-
-            # This is called in two places: First (and ideally) is in the mini scheduler at the end of
-            # LocalTaskJob, and then as an "expansion of last resort" in the scheduler
-            # to ensure that the mapped task is correctly expanded before we try to execute it.
-            if schedulable.map_index < 0 and schedulable.task.is_mapped:
-                # HACK. This needs a better way, one that copes with multiple upstreams!
-                for ti in finished_tis:
-                    if schedulable.task_id in ti.task.downstream_task_ids:
-
-                        assert isinstance(schedulable.task, MappedOperator)
-                        new_tis, _ = schedulable.task.expand_mapped_task(self.run_id, session=session)
-                        if schedulable.state == TaskInstanceState.SKIPPED:
-                            # Task is now skipped (likely cos upstream returned 0 tasks
-                            continue
-                        assert new_tis[0] is schedulable
-                        expanded_tis.extend(new_tis[1:])
-                        break
+            # If schedulable is from a mapped task, but not yet expanded, do it
+            # now. This is called in two places: First and ideally in the mini
+            # scheduler at the end of LocalTaskJob, and then as an "expansion of
+            # last resort" in the scheduler to ensure that the mapped task is
+            # correctly expanded before executed.
+            if schedulable.map_index < 0 and isinstance(schedulable.task, MappedOperator):
+                expanded_tis, _ = schedulable.task.expand_mapped_task(self.run_id, session=session)
+                if expanded_tis:
+                    assert expanded_tis[0] is schedulable
+                    additional_tis.extend(expanded_tis[1:])
+                expansion_happened = True
+            if schedulable.state in SCHEDULEABLE_STATES:
+                ready_tis.append(schedulable)
 
         # Check if any ti changed state
-        tis_filter = TI.filter_for_tis(old_states.keys())
+        tis_filter = TI.filter_for_tis(old_states)
         if tis_filter is not None:
             fresh_tis = session.query(TI).filter(tis_filter).all()
             changed_tis = any(ti.state != old_states[ti.key] for ti in fresh_tis)
 
-        return ready_tis, changed_tis
+        return ready_tis, changed_tis, expansion_happened
 
     def _are_premature_tis(
         self,
@@ -784,8 +791,8 @@ class DagRun(Base, LoggingMixin):
                 true_delay = first_start_date - data_interval_end
                 if true_delay.total_seconds() > 0:
                     Stats.timing(f'dagrun.{dag.dag_id}.first_task_scheduling_delay', true_delay)
-        except Exception as e:
-            self.log.warning(f'Failed to record first_task_scheduling_delay metric:\n{e}')
+        except Exception:
+            self.log.warning('Failed to record first_task_scheduling_delay metric:', exc_info=True)
 
     def _emit_duration_stats_for_finished_state(self):
         if self.state == State.RUNNING:
@@ -813,13 +820,50 @@ class DagRun(Base, LoggingMixin):
         """
         from airflow.settings import task_instance_mutation_hook
 
+        # Set for the empty default in airflow.settings -- if it's not set this means it has been changed
+        hook_is_noop = getattr(task_instance_mutation_hook, 'is_noop', False)
+
         dag = self.get_dag()
+        task_ids = self._check_for_removed_or_restored_tasks(
+            dag, task_instance_mutation_hook, session=session
+        )
+
+        def task_filter(task: "Operator") -> bool:
+            return task.task_id not in task_ids and (
+                self.is_backfill
+                or task.start_date <= self.execution_date
+                and (task.end_date is None or self.execution_date <= task.end_date)
+            )
+
+        created_counts: Dict[str, int] = defaultdict(int)
+
+        # Get task creator function
+        task_creator = self._get_task_creator(created_counts, task_instance_mutation_hook, hook_is_noop)
+
+        # Create the missing tasks, including mapped tasks
+        tasks = self._create_missing_tasks(dag, task_creator, task_filter, session=session)
+
+        self._create_task_instances(dag.dag_id, tasks, created_counts, hook_is_noop, session=session)
+
+    def _check_for_removed_or_restored_tasks(
+        self, dag: "DAG", ti_mutation_hook, *, session: Session
+    ) -> Set[str]:
+        """
+        Check for removed tasks/restored tasks.
+
+        :param dag: DAG object corresponding to the dagrun
+        :param ti_mutation_hook: task_instance_mutation_hook function
+        :param session: Sqlalchemy ORM Session
+
+        :return: List of task_ids in the dagrun
+
+        """
         tis = self.get_task_instances(session=session)
 
         # check for removed or restored tasks
         task_ids = set()
         for ti in tis:
-            task_instance_mutation_hook(ti)
+            ti_mutation_hook(ti)
             task_ids.add(ti.task_id)
             task = None
             try:
@@ -880,19 +924,21 @@ class DagRun(Base, LoggingMixin):
                     )
                     ti.state = State.REMOVED
                     ...
+        return task_ids
 
-        def task_filter(task: "Operator") -> bool:
-            return task.task_id not in task_ids and (
-                self.is_backfill
-                or task.start_date <= self.execution_date
-                and (task.end_date is None or self.execution_date <= task.end_date)
-            )
+    def _get_task_creator(
+        self, created_counts: Dict[str, int], ti_mutation_hook: Callable, hook_is_noop: bool
+    ) -> Callable:
+        """
+        Get the task creator function.
 
-        created_counts: Dict[str, int] = defaultdict(int)
+        This function also updates the created_counts dictionary with the number of tasks created.
 
-        # Set for the empty default in airflow.settings -- if it's not set this means it has been changed
-        hook_is_noop = getattr(task_instance_mutation_hook, 'is_noop', False)
+        :param created_counts: Dictionary of task_type -> count of created TIs
+        :param ti_mutation_hook: task_instance_mutation_hook function
+        :param hook_is_noop: Whether the task_instance_mutation_hook is a noop
 
+        """
         if hook_is_noop:
 
             def create_ti_mapping(task: "Operator", indexes: Tuple[int, ...]) -> Generator:
@@ -907,13 +953,25 @@ class DagRun(Base, LoggingMixin):
             def create_ti(task: "Operator", indexes: Tuple[int, ...]) -> Generator:
                 for map_index in indexes:
                     ti = TI(task, run_id=self.run_id, map_index=map_index)
-                    task_instance_mutation_hook(ti)
+                    ti_mutation_hook(ti)
                     created_counts[ti.operator] += 1
                     yield ti
 
             creator = create_ti
+        return creator
 
-        # Create missing tasks -- and expand any MappedOperator that _only_ have literals as input
+    def _create_missing_tasks(
+        self, dag: "DAG", task_creator: Callable, task_filter: Callable, *, session: Session
+    ) -> Iterable["Operator"]:
+        """
+        Create missing tasks -- and expand any MappedOperator that _only_ have literals as input
+
+        :param dag: DAG object corresponding to the dagrun
+        :param task_creator: a function that creates tasks
+        :param task_filter: a function that filters tasks to create
+        :param session: the session to use
+        """
+
         def expand_mapped_literals(task: "Operator") -> Tuple["Operator", Sequence[int]]:
             if not task.is_mapped:
                 return (task, (-1,))
@@ -926,8 +984,29 @@ class DagRun(Base, LoggingMixin):
             return (task, range(count))
 
         tasks_and_map_idxs = map(expand_mapped_literals, filter(task_filter, dag.task_dict.values()))
-        tasks = itertools.chain.from_iterable(itertools.starmap(creator, tasks_and_map_idxs))
 
+        tasks = itertools.chain.from_iterable(itertools.starmap(task_creator, tasks_and_map_idxs))
+        return tasks
+
+    def _create_task_instances(
+        self,
+        dag_id: str,
+        tasks: Iterable["Operator"],
+        created_counts: Dict[str, int],
+        hook_is_noop: bool,
+        *,
+        session: Session,
+    ) -> None:
+        """
+        Create the necessary task instances from the given tasks.
+
+        :param dag_id: DAG ID associated with the dagrun
+        :param tasks: the tasks to create the task instances from
+        :param created_counts: a dictionary of number of tasks -> total ti created by the task creator
+        :param hook_is_noop: whether the task_instance_mutation_hook is noop
+        :param session: the session to use
+
+        """
         try:
             if hook_is_noop:
                 session.bulk_insert_mappings(TI, tasks)
@@ -940,7 +1019,7 @@ class DagRun(Base, LoggingMixin):
         except IntegrityError:
             self.log.info(
                 'Hit IntegrityError while creating the TIs for %s- %s',
-                dag.dag_id,
+                dag_id,
                 self.run_id,
                 exc_info=True,
             )
@@ -1022,7 +1101,7 @@ class DagRun(Base, LoggingMixin):
             ):
                 dummy_ti_ids.append(ti.task_id)
             else:
-                schedulable_ti_ids.append(ti.task_id)
+                schedulable_ti_ids.append((ti.task_id, ti.map_index))
 
         count = 0
 
@@ -1032,7 +1111,7 @@ class DagRun(Base, LoggingMixin):
                 .filter(
                     TI.dag_id == self.dag_id,
                     TI.run_id == self.run_id,
-                    TI.task_id.in_(schedulable_ti_ids),
+                    tuple_in_condition((TI.task_id, TI.map_index), schedulable_ti_ids),
                 )
                 .update({TI.state: State.SCHEDULED}, synchronize_session=False)
             )
@@ -1060,14 +1139,23 @@ class DagRun(Base, LoggingMixin):
         return count
 
     @provide_session
-    def get_log_filename_template(self, *, session: Session = NEW_SESSION) -> str:
+    def get_log_template(self, *, session: Session = NEW_SESSION) -> LogTemplate:
         if self.log_template_id is None:  # DagRun created before LogTemplate introduction.
-            template = session.query(LogTemplate.filename).order_by(LogTemplate.id).limit(1).scalar()
+            template = session.query(LogTemplate).order_by(LogTemplate.id).first()
         else:
-            template = session.query(LogTemplate.filename).filter_by(id=self.log_template_id).scalar()
+            template = session.query(LogTemplate).get(self.log_template_id)
         if template is None:
             raise AirflowException(
                 f"No log_template entry found for ID {self.log_template_id!r}. "
                 f"Please make sure you set up the metadatabase correctly."
             )
         return template
+
+    @provide_session
+    def get_log_filename_template(self, *, session: Session = NEW_SESSION) -> str:
+        warnings.warn(
+            "This method is deprecated. Please use get_log_template instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_log_template(session=session).filename

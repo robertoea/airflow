@@ -18,16 +18,17 @@
 #
 import collections
 import copy
+import itertools
 import json
 import logging
 import math
 import re
-import socket
 import sys
 import traceback
 import warnings
+from bisect import insort_left
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import wraps
 from json import JSONDecodeError
 from operator import itemgetter
@@ -38,6 +39,7 @@ import lazy_object_proxy
 import markupsafe
 import nvd3
 import sqlalchemy as sqla
+from croniter import croniter
 from flask import (
     Response,
     abort,
@@ -95,10 +97,11 @@ from airflow.api.common.mark_tasks import (
     set_dag_run_state_to_failed,
     set_dag_run_state_to_queued,
     set_dag_run_state_to_success,
+    set_state,
 )
 from airflow.compat.functools import cached_property
 from airflow.configuration import AIRFLOW_CONFIG, conf
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, ParamValidationError
 from airflow.executors.executor_loader import ExecutorLoader
 from airflow.jobs.base_job import BaseJob
 from airflow.jobs.scheduler_job import SchedulerJob
@@ -107,6 +110,7 @@ from airflow.models import DAG, Connection, DagModel, DagTag, Log, SlaMiss, Task
 from airflow.models.abstractoperator import AbstractOperator
 from airflow.models.dagcode import DagCode
 from airflow.models.dagrun import DagRun, DagRunType
+from airflow.models.operator import Operator
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.models.taskinstance import TaskInstance
 from airflow.providers_manager import ProvidersManager
@@ -114,12 +118,14 @@ from airflow.security import permissions
 from airflow.ti_deps.dep_context import DepContext
 from airflow.ti_deps.dependencies_deps import RUNNING_DEPS, SCHEDULER_QUEUED_DEPS
 from airflow.timetables.base import DataInterval, TimeRestriction
+from airflow.timetables.interval import CronDataIntervalTimetable
 from airflow.utils import json as utils_json, timezone, yaml
 from airflow.utils.dates import infer_time_unit, scale_time_units
 from airflow.utils.docs import get_doc_url_for_provider, get_docs_url
 from airflow.utils.helpers import alchemy_to_dict
 from airflow.utils.log import secrets_masker
 from airflow.utils.log.log_reader import TaskLogReader
+from airflow.utils.net import get_hostname
 from airflow.utils.session import NEW_SESSION, create_session, provide_session
 from airflow.utils.state import State, TaskInstanceState
 from airflow.utils.strings import to_boolean
@@ -184,13 +190,13 @@ def get_date_time_num_runs_dag_runs_form_data(www_request, session, dag):
     """Get Execution Data, Base Date & Number of runs from a Request"""
     date_time = www_request.args.get('execution_date')
     if date_time:
-        date_time = timezone.parse(date_time)
+        date_time = _safe_parse_datetime(date_time)
     else:
         date_time = dag.get_latest_execution_date(session=session) or timezone.utcnow()
 
     base_date = www_request.args.get('base_date')
     if base_date:
-        base_date = timezone.parse(base_date)
+        base_date = _safe_parse_datetime(base_date)
     else:
         # The DateTimeField widget truncates milliseconds and would loose
         # the first dag run. Round to next second.
@@ -199,9 +205,19 @@ def get_date_time_num_runs_dag_runs_form_data(www_request, session, dag):
     default_dag_run = conf.getint('webserver', 'default_dag_run_display_number')
     num_runs = www_request.args.get('num_runs', default=default_dag_run, type=int)
 
+    # When base_date has been rounded up because of the DateTimeField widget, we want
+    # to use the execution_date as the starting point for our query just to ensure a
+    # link targeting a specific dag run actually loads that dag run.  If there are
+    # more than num_runs dag runs in the "rounded period" then those dagruns would get
+    # loaded and the actual requested run would be excluded by the limit().  Once
+    # the user has changed base date to be anything else we want to use that instead.
+    query_date = base_date
+    if date_time < base_date and date_time + timedelta(seconds=1) >= base_date:
+        query_date = date_time
+
     drs = (
         session.query(DagRun)
-        .filter(DagRun.dag_id == dag.dag_id, DagRun.execution_date <= base_date)
+        .filter(DagRun.dag_id == dag.dag_id, DagRun.execution_date <= query_date)
         .order_by(desc(DagRun.execution_date))
         .limit(num_runs)
         .all()
@@ -229,72 +245,168 @@ def get_date_time_num_runs_dag_runs_form_data(www_request, session, dag):
     }
 
 
-def task_group_to_tree(task_item_or_group, dag, dag_runs, tis, session):
+def _safe_parse_datetime(v):
+    """Parse datetime and return error message for invalid dates"""
+    try:
+        return timezone.parse(v)
+    except (TypeError, ParserError):
+        abort(400, f"Invalid datetime: {v!r}")
+
+
+def dag_to_grid(dag, dag_runs, session):
     """
-    Create a nested dict representation of this TaskGroup and its children used to construct
-    the Graph.
+    Create a nested dict representation of the DAG's TaskGroup and its children
+    used to construct the Graph and Grid views.
     """
-    if isinstance(task_item_or_group, AbstractOperator):
+    query = (
+        session.query(
+            TaskInstance.task_id,
+            TaskInstance.run_id,
+            TaskInstance.state,
+            sqla.func.count(sqla.func.coalesce(TaskInstance.state, sqla.literal('no_status'))).label(
+                'state_count'
+            ),
+            sqla.func.min(TaskInstance.start_date).label('start_date'),
+            sqla.func.max(TaskInstance.end_date).label('end_date'),
+            sqla.func.max(TaskInstance._try_number).label('_try_number'),
+        )
+        .filter(
+            TaskInstance.dag_id == dag.dag_id,
+            TaskInstance.run_id.in_([dag_run.run_id for dag_run in dag_runs]),
+        )
+        .group_by(TaskInstance.task_id, TaskInstance.run_id, TaskInstance.state)
+        .order_by(TaskInstance.task_id, TaskInstance.run_id)
+    )
+
+    grouped_tis = {task_id: list(tis) for task_id, tis in itertools.groupby(query, key=lambda ti: ti.task_id)}
+
+    def task_group_to_grid(item, dag_runs, grouped_tis):
+        if isinstance(item, AbstractOperator):
+
+            def _get_summary(task_instance):
+                try_count = (
+                    task_instance._try_number
+                    if task_instance._try_number != 0 or task_instance.state in State.running
+                    else task_instance._try_number + 1
+                )
+
+                return {
+                    'task_id': task_instance.task_id,
+                    'run_id': task_instance.run_id,
+                    'state': task_instance.state,
+                    'start_date': task_instance.start_date,
+                    'end_date': task_instance.end_date,
+                    'try_number': try_count,
+                }
+
+            def _mapped_summary(ti_summaries):
+                run_id = None
+                record = None
+
+                def set_overall_state(record):
+                    for state in wwwutils.priority:
+                        if state in record['mapped_states']:
+                            record['state'] = state
+                            break
+                    if None in record['mapped_states']:
+                        # When turnong the dict into JSON we can't have None as a key, so use the string that
+                        # the UI does
+                        record['mapped_states']['no_status'] = record['mapped_states'].pop(None)
+
+                for ti_summary in ti_summaries:
+                    if ti_summary.state is None:
+                        ti_summary.state == 'no_status'
+                    if run_id != ti_summary.run_id:
+                        run_id = ti_summary.run_id
+                        if record:
+                            set_overall_state(record)
+                            yield record
+                        record = {
+                            'task_id': ti_summary.task_id,
+                            'run_id': run_id,
+                            'start_date': ti_summary.start_date,
+                            'end_date': ti_summary.end_date,
+                            'mapped_states': {ti_summary.state: ti_summary.state_count},
+                            'state': None,  # We change this before yielding
+                        }
+                        continue
+                    record['start_date'] = min(
+                        filter(None, [record['start_date'], ti_summary.start_date]), default=None
+                    )
+                    record['end_date'] = max(
+                        filter(None, [record['end_date'], ti_summary.end_date]), default=None
+                    )
+                    record['mapped_states'][ti_summary.state] = ti_summary.state_count
+                if record:
+                    set_overall_state(record)
+                    yield record
+
+            if item.is_mapped:
+                instances = list(_mapped_summary(grouped_tis.get(item.task_id, [])))
+            else:
+                instances = list(map(_get_summary, grouped_tis.get(item.task_id, [])))
+
+            return {
+                'id': item.task_id,
+                'instances': instances,
+                'label': item.label,
+                'extra_links': item.extra_links,
+                'is_mapped': item.is_mapped,
+            }
+
+        # Task Group
+        task_group = item
+
+        children = [
+            task_group_to_grid(child, dag_runs, grouped_tis) for child in task_group.topological_sort()
+        ]
+
+        def get_summary(dag_run, children):
+            child_instances = [child['instances'] for child in children if 'instances' in child]
+            child_instances = [
+                item for sublist in child_instances for item in sublist if item['run_id'] == dag_run.run_id
+            ]
+
+            children_start_dates = (item['start_date'] for item in child_instances if item)
+            children_end_dates = (item['end_date'] for item in child_instances if item)
+            children_states = {item['state'] for item in child_instances if item}
+
+            group_state = None
+            for state in wwwutils.priority:
+                if state in children_states:
+                    group_state = state
+                    break
+            group_start_date = min(filter(None, children_start_dates), default=None)
+            group_end_date = max(filter(None, children_end_dates), default=None)
+
+            return {
+                'task_id': task_group.group_id,
+                'run_id': dag_run.run_id,
+                'state': group_state,
+                'start_date': group_start_date,
+                'end_date': group_end_date,
+            }
+
+        # We don't need to calculate summaries for the root
+        if task_group.group_id is None:
+            return {
+                'id': task_group.group_id,
+                'label': task_group.label,
+                'children': children,
+                'instances': [],
+            }
+
+        group_summaries = [get_summary(dr, children) for dr in dag_runs]
+
         return {
-            'id': task_item_or_group.task_id,
-            'instances': [
-                wwwutils.encode_ti(ti, task_item_or_group.is_mapped, session)
-                for ti in tis
-                if ti.task_id == task_item_or_group.task_id
-            ],
-            'label': task_item_or_group.label,
-            'extra_links': task_item_or_group.extra_links,
-            'is_mapped': task_item_or_group.is_mapped,
+            'id': task_group.group_id,
+            'label': task_group.label,
+            'children': children,
+            'tooltip': task_group.tooltip,
+            'instances': group_summaries,
         }
 
-    # Task Group
-    task_group = task_item_or_group
-
-    children = [
-        task_group_to_tree(child, dag, dag_runs, tis, session) for child in task_group.topological_sort()
-    ]
-
-    def get_summary(dag_run, children):
-        child_instances = [child['instances'] for child in children if 'instances' in child]
-        child_instances = [item for sublist in child_instances for item in sublist]
-
-        children_start_dates = [
-            item['start_date'] for item in child_instances if item['run_id'] == dag_run.run_id
-        ]
-        children_end_dates = [
-            item['end_date'] for item in child_instances if item['run_id'] == dag_run.run_id
-        ]
-        children_states = [item['state'] for item in child_instances if item['run_id'] == dag_run.run_id]
-
-        group_state = None
-        for state in wwwutils.priority:
-            if state in children_states:
-                group_state = state
-                break
-        group_start_date = wwwutils.datetime_to_string(
-            min((timezone.parse(date) for date in children_start_dates if date), default=None)
-        )
-        group_end_date = wwwutils.datetime_to_string(
-            max((timezone.parse(date) for date in children_end_dates if date), default=None)
-        )
-
-        return {
-            'task_id': task_group.group_id,
-            'run_id': dag_run.run_id,
-            'state': group_state,
-            'start_date': group_start_date,
-            'end_date': group_end_date,
-        }
-
-    group_summaries = [get_summary(dr, children) for dr in dag_runs]
-
-    return {
-        'id': task_group.group_id,
-        'label': task_group.label,
-        'children': children,
-        'tooltip': task_group.tooltip,
-        'instances': group_summaries,
-    }
+    return task_group_to_grid(dag.task_group, dag_runs, grouped_tis)
 
 
 def task_group_to_dict(task_item_or_group):
@@ -511,13 +623,15 @@ def get_task_stats_from_query(qry):
     return data
 
 
-def redirect_or_json(origin, msg, status=""):
+def redirect_or_json(origin, msg, status="", status_code=200):
     """
     Some endpoints are called by javascript,
     returning json will allow us to more elegantly handle side-effects in-page
     """
     if request.headers.get('Accept') == 'application/json':
-        return {'status': status, 'message': msg}
+        if status == 'error' and status_code == 200:
+            status_code = 500
+        return Response(response=msg, status=status_code, mimetype="application/json")
     else:
         if status:
             flash(msg, status)
@@ -536,7 +650,7 @@ def not_found(error):
     return (
         render_template(
             'airflow/not_found.html',
-            hostname=socket.getfqdn()
+            hostname=get_hostname()
             if conf.getboolean('webserver', 'EXPOSE_HOSTNAME', fallback=True)
             else 'redact',
         ),
@@ -551,7 +665,7 @@ def show_traceback(error):
             'airflow/traceback.html',
             python_version=sys.version.split(" ")[0],
             airflow_version=version,
-            hostname=socket.getfqdn()
+            hostname=get_hostname()
             if conf.getboolean('webserver', 'EXPOSE_HOSTNAME', fallback=True)
             else 'redact',
             info=traceback.format_exc()
@@ -816,13 +930,13 @@ class Airflow(AirflowBaseView):
 
         def _iter_parsed_moved_data_table_names():
             for table_name in inspect(session.get_bind()).get_table_names():
-                segments = table_name.split("__", 2)
+                segments = table_name.split("__", 3)
                 if len(segments) < 3:
                     continue
                 if segments[0] != settings.AIRFLOW_MOVED_TABLE_PREFIX:
                     continue
                 # Second segment is a version marker that we don't need to show.
-                yield segments[2], table_name
+                yield segments[-1], table_name
 
         if (
             permissions.ACTION_CAN_ACCESS_MENU,
@@ -877,6 +991,7 @@ class Airflow(AirflowBaseView):
             tags_filter=arg_tags_filter,
             sorting_key=arg_sorting_key,
             sorting_direction=arg_sorting_direction,
+            auto_refresh_interval=conf.getint('webserver', 'auto_refresh_interval'),
         )
 
     @expose('/dag_stats', methods=['POST'])
@@ -1130,7 +1245,7 @@ class Airflow(AirflowBaseView):
         except Exception as e:
             all_errors += (
                 "Exception encountered during "
-                + f"dag_id retrieval/dag retrieval fallback/code highlighting:\n\n{e}\n"
+                f"dag_id retrieval/dag retrieval fallback/code highlighting:\n\n{e}\n"
             )
             html_code = Markup('<p>Failed to load DAG file Code.</p><p>Details: {}</p>').format(
                 escape(all_errors)
@@ -1240,7 +1355,7 @@ class Airflow(AirflowBaseView):
         task_id = request.args.get('task_id')
         map_index = request.args.get('map_index', -1, type=int)
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
         form = DateTimeForm(data={'execution_date': dttm})
         root = request.args.get('root', '')
 
@@ -1341,7 +1456,8 @@ class Airflow(AirflowBaseView):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
+
         form = DateTimeForm(data={'execution_date': dttm})
         root = request.args.get('root', '')
         map_index = request.args.get('map_index', -1, type=int)
@@ -1490,7 +1606,12 @@ class Airflow(AirflowBaseView):
         task_id = request.args.get('task_id')
         map_index = request.args.get('map_index', -1, type=int)
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date) if execution_date else None
+
+        if execution_date:
+            dttm = _safe_parse_datetime(execution_date)
+        else:
+            dttm = None
+
         form = DateTimeForm(data={'execution_date': dttm})
         dag_model = DagModel.get_dagmodel(dag_id)
 
@@ -1537,7 +1658,7 @@ class Airflow(AirflowBaseView):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
         map_index = request.args.get('map_index', -1, type=int)
         try_number = request.args.get('try_number', 1)
 
@@ -1574,7 +1695,7 @@ class Airflow(AirflowBaseView):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
         map_index = request.args.get('map_index', -1, type=int)
         form = DateTimeForm(data={'execution_date': dttm})
         root = request.args.get('root', '')
@@ -1602,10 +1723,22 @@ class Airflow(AirflowBaseView):
             ti_attrs: Optional[List[Tuple[str, Any]]] = None
         else:
             ti.refresh_from_task(task)
+            ti_attrs_to_skip = [
+                'dag_id',
+                'key',
+                'mark_success_url',
+                'log',
+                'log_url',
+                'task',
+            ]
             # Some fields on TI are deprecated, but we don't want those warnings here.
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
-                all_ti_attrs = ((name, getattr(ti, name)) for name in dir(ti) if not name.startswith("_"))
+                all_ti_attrs = (
+                    (name, getattr(ti, name))
+                    for name in dir(ti)
+                    if not name.startswith("_") and name not in ti_attrs_to_skip
+                )
             ti_attrs = sorted((name, attr) for name, attr in all_ti_attrs if not callable(attr))
 
         attr_renderers = wwwutils.get_attr_renderer()
@@ -1694,7 +1827,8 @@ class Airflow(AirflowBaseView):
         # Carrying execution_date through, even though it's irrelevant for
         # this context
         execution_date = request.args.get('execution_date')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
+
         form = DateTimeForm(data={'execution_date': dttm})
         root = request.args.get('root', '')
         dag = DagModel.get_dagmodel(dag_id)
@@ -1755,13 +1889,13 @@ class Airflow(AirflowBaseView):
 
         if not getattr(executor, "supports_ad_hoc_ti_run", False):
             msg = "Only works with the Celery, CeleryKubernetes or Kubernetes executors"
-            return redirect_or_json(origin, msg, "error")
+            return redirect_or_json(origin, msg, "error", 400)
 
         dag_run = dag.get_dagrun(run_id=dag_run_id)
         ti = dag_run.get_task_instance(task_id=task.task_id, map_index=map_index)
         if not ti:
             msg = "Could not queue task instance for execution, task instance is missing"
-            return redirect_or_json(origin, msg, "error")
+            return redirect_or_json(origin, msg, "error", 400)
 
         ti.refresh_from_task(task)
 
@@ -1776,7 +1910,7 @@ class Airflow(AirflowBaseView):
         if failed_deps:
             failed_deps_str = ", ".join(f"{dep.dep_name}: {dep.reason}" for dep in failed_deps)
             msg = f"Could not queue task instance for execution, dependencies not met: {failed_deps_str}"
-            return redirect_or_json(origin, msg, "error")
+            return redirect_or_json(origin, msg, "error", 400)
 
         executor.job_id = "manual"
         executor.start()
@@ -1900,6 +2034,14 @@ class Airflow(AirflowBaseView):
             flash(f"The run_id {dr.run_id} already exists", "error")
             return redirect(origin)
 
+        # Flash a warning when slash is used, but still allow it to continue on.
+        if run_id and "/" in run_id:
+            flash(
+                "Using forward slash ('/') in a DAG run ID is deprecated. Note that this character "
+                "also makes the run impossible to retrieve via Airflow's REST API.",
+                "warning",
+            )
+
         run_conf = {}
         if request_conf:
             try:
@@ -1941,7 +2083,7 @@ class Airflow(AirflowBaseView):
                 dag_hash=current_app.dag_bag.dags_hash.get(dag_id),
                 run_id=run_id,
             )
-        except ValueError as ve:
+        except (ValueError, ParamValidationError) as ve:
             flash(f"{ve}", "error")
             form = DateTimeForm(data={'execution_date': execution_date})
             return self.render_template(
@@ -1958,10 +2100,11 @@ class Airflow(AirflowBaseView):
 
     def _clear_dag_tis(
         self,
-        dag,
+        dag: DAG,
         start_date,
         end_date,
         origin,
+        task_ids=None,
         recursive=False,
         confirmed=False,
         only_failed=False,
@@ -1970,6 +2113,7 @@ class Airflow(AirflowBaseView):
             count = dag.clear(
                 start_date=start_date,
                 end_date=end_date,
+                task_ids=task_ids,
                 include_subdags=recursive,
                 include_parentdag=recursive,
                 only_failed=only_failed,
@@ -1982,32 +2126,28 @@ class Airflow(AirflowBaseView):
             tis = dag.clear(
                 start_date=start_date,
                 end_date=end_date,
+                task_ids=task_ids,
                 include_subdags=recursive,
                 include_parentdag=recursive,
                 only_failed=only_failed,
                 dry_run=True,
             )
         except AirflowException as ex:
-            return redirect_or_json(origin, msg=str(ex), status="error")
+            return redirect_or_json(origin, msg=str(ex), status="error", status_code=500)
 
-        if not tis:
-            msg = "No task instances to clear"
-            return redirect_or_json(origin, msg, status="error")
+        assert isinstance(tis, collections.abc.Iterable)
+        details = [str(t) for t in tis]
+
+        if not details:
+            return redirect_or_json(origin, "No task instances to clear", status="error", status_code=404)
         elif request.headers.get('Accept') == 'application/json':
-            details = [str(t) for t in tis]
-
             return htmlsafe_json_dumps(details, separators=(',', ':'))
-        else:
-            details = "\n".join(str(t) for t in tis)
-
-            response = self.render_template(
-                'airflow/confirm.html',
-                endpoint=None,
-                message="Task instances you are about to clear:",
-                details=details,
-            )
-
-        return response
+        return self.render_template(
+            'airflow/confirm.html',
+            endpoint=None,
+            message="Task instances you are about to clear:",
+            details="\n".join(details),
+        )
 
     @expose('/clear', methods=['POST'])
     @auth.has_access(
@@ -2024,8 +2164,13 @@ class Airflow(AirflowBaseView):
         origin = get_safe_url(request.form.get('origin'))
         dag = current_app.dag_bag.get_dag(dag_id)
 
+        if 'map_index' not in request.form:
+            map_indexes: Optional[List[int]] = None
+        else:
+            map_indexes = request.form.getlist('map_index', type=int)
+
         execution_date = request.form.get('execution_date')
-        execution_date = timezone.parse(execution_date)
+        execution_date = _safe_parse_datetime(execution_date)
         confirmed = request.form.get('confirmed') == "true"
         upstream = request.form.get('upstream') == "true"
         downstream = request.form.get('downstream') == "true"
@@ -2034,11 +2179,22 @@ class Airflow(AirflowBaseView):
         recursive = request.form.get('recursive') == "true"
         only_failed = request.form.get('only_failed') == "true"
 
+        task_ids: List[Union[str, Tuple[str, int]]]
+        if map_indexes is None:
+            task_ids = [task_id]
+        else:
+            task_ids = [(task_id, map_index) for map_index in map_indexes]
+
         dag = dag.partial_subset(
-            task_ids_or_regex=fr"^{task_id}$",
+            task_ids_or_regex=[task_id],
             include_downstream=downstream,
             include_upstream=upstream,
         )
+
+        if len(dag.task_dict) > 1:
+            # If we had upstream/downstream etc then also include those!
+            task_ids.extend(tid for tid in dag.task_dict if tid != task_id)
+
         end_date = execution_date if not future else None
         start_date = execution_date if not past else None
 
@@ -2047,6 +2203,7 @@ class Airflow(AirflowBaseView):
             start_date,
             end_date,
             origin,
+            task_ids=task_ids,
             recursive=recursive,
             confirmed=confirmed,
             only_failed=only_failed,
@@ -2279,26 +2436,28 @@ class Airflow(AirflowBaseView):
 
     def _mark_task_instance_state(
         self,
-        dag_id,
-        task_id,
-        origin,
-        dag_run_id,
-        upstream,
-        downstream,
-        future,
-        past,
-        state,
+        *,
+        dag_id: str,
+        run_id: str,
+        task_id: str,
+        map_indexes: Optional[List[int]],
+        origin: str,
+        upstream: bool,
+        downstream: bool,
+        future: bool,
+        past: bool,
+        state: TaskInstanceState,
     ):
-        dag = current_app.dag_bag.get_dag(dag_id)
-        latest_execution_date = dag.get_latest_execution_date()
+        dag: DAG = current_app.dag_bag.get_dag(dag_id)
 
-        if not latest_execution_date:
-            flash(f"Cannot mark tasks as {state}, seem that dag {dag_id} has never run", "error")
+        if not run_id:
+            flash(f"Cannot mark tasks as {state}, seem that DAG {dag_id} has never run", "error")
             return redirect(origin)
 
         altered = dag.set_task_instance_state(
             task_id=task_id,
-            run_id=dag_run_id,
+            map_indexes=map_indexes,
+            run_id=run_id,
             state=state,
             upstream=upstream,
             downstream=downstream,
@@ -2326,6 +2485,11 @@ class Airflow(AirflowBaseView):
         state = args.get('state')
         origin = args.get('origin')
 
+        if 'map_index' not in args:
+            map_indexes: Optional[List[int]] = None
+        else:
+            map_indexes = args.getlist('map_index', type=int)
+
         upstream = to_boolean(args.get('upstream'))
         downstream = to_boolean(args.get('downstream'))
         future = to_boolean(args.get('future'))
@@ -2335,13 +2499,13 @@ class Airflow(AirflowBaseView):
         dag = current_app.dag_bag.get_dag(dag_id)
         if not dag:
             msg = f'DAG {dag_id} not found'
-            return redirect_or_json(origin, msg, status='error')
+            return redirect_or_json(origin, msg, status='error', status_code=404)
 
         try:
             task = dag.get_task(task_id)
         except airflow.exceptions.TaskNotFound:
             msg = f"Task {task_id} not found"
-            return redirect_or_json(origin, msg, status='error')
+            return redirect_or_json(origin, msg, status='error', status_code=404)
 
         task.dag = dag
 
@@ -2350,17 +2514,20 @@ class Airflow(AirflowBaseView):
             'failed',
         ):
             msg = f"Invalid state {state}, must be either 'success' or 'failed'"
-            return redirect_or_json(origin, msg, status='error')
+            return redirect_or_json(origin, msg, status='error', status_code=400)
 
         latest_execution_date = dag.get_latest_execution_date()
         if not latest_execution_date:
             msg = f"Cannot mark tasks as {state}, seem that dag {dag_id} has never run"
-            return redirect_or_json(origin, msg, status='error')
+            return redirect_or_json(origin, msg, status='error', status_code=400)
 
-        from airflow.api.common.mark_tasks import set_state
+        if map_indexes is None:
+            tasks: Union[List[Operator], List[Tuple[Operator, int]]] = [task]
+        else:
+            tasks = [(task, map_index) for map_index in map_indexes]
 
         to_be_altered = set_state(
-            tasks=[task],
+            tasks=tasks,
             run_id=dag_run_id,
             upstream=upstream,
             downstream=downstream,
@@ -2398,24 +2565,30 @@ class Airflow(AirflowBaseView):
         args = request.form
         dag_id = args.get('dag_id')
         task_id = args.get('task_id')
-        origin = get_safe_url(args.get('origin'))
-        dag_run_id = args.get('dag_run_id')
+        run_id = args.get('dag_run_id')
 
+        if 'map_index' not in args:
+            map_indexes: Optional[List[int]] = None
+        else:
+            map_indexes = args.getlist('map_index', type=int)
+
+        origin = get_safe_url(args.get('origin'))
         upstream = to_boolean(args.get('upstream'))
         downstream = to_boolean(args.get('downstream'))
         future = to_boolean(args.get('future'))
         past = to_boolean(args.get('past'))
 
         return self._mark_task_instance_state(
-            dag_id,
-            task_id,
-            origin,
-            dag_run_id,
-            upstream,
-            downstream,
-            future,
-            past,
-            State.FAILED,
+            dag_id=dag_id,
+            run_id=run_id,
+            task_id=task_id,
+            map_indexes=map_indexes,
+            origin=origin,
+            upstream=upstream,
+            downstream=downstream,
+            future=future,
+            past=past,
+            state=TaskInstanceState.FAILED,
         )
 
     @expose('/success', methods=['POST'])
@@ -2431,24 +2604,30 @@ class Airflow(AirflowBaseView):
         args = request.form
         dag_id = args.get('dag_id')
         task_id = args.get('task_id')
-        origin = get_safe_url(args.get('origin'))
-        dag_run_id = args.get('dag_run_id')
+        run_id = args.get('dag_run_id')
 
+        if 'map_index' not in args:
+            map_indexes: Optional[List[int]] = None
+        else:
+            map_indexes = args.getlist('map_index', type=int)
+
+        origin = get_safe_url(args.get('origin'))
         upstream = to_boolean(args.get('upstream'))
         downstream = to_boolean(args.get('downstream'))
         future = to_boolean(args.get('future'))
         past = to_boolean(args.get('past'))
 
         return self._mark_task_instance_state(
-            dag_id,
-            task_id,
-            origin,
-            dag_run_id,
-            upstream,
-            downstream,
-            future,
-            past,
-            State.SUCCESS,
+            dag_id=dag_id,
+            run_id=run_id,
+            task_id=task_id,
+            map_indexes=map_indexes,
+            origin=origin,
+            upstream=upstream,
+            downstream=downstream,
+            future=future,
+            past=past,
+            state=TaskInstanceState.SUCCESS,
         )
 
     @expose('/dags/<string:dag_id>')
@@ -2522,7 +2701,7 @@ class Airflow(AirflowBaseView):
             num_runs = conf.getint('webserver', 'default_dag_run_display_number')
 
         try:
-            base_date = timezone.parse(request.args["base_date"])
+            base_date = _safe_parse_datetime(request.args["base_date"])
         except (KeyError, ValueError):
             base_date = dag.get_latest_execution_date() or timezone.utcnow()
 
@@ -2533,8 +2712,6 @@ class Airflow(AirflowBaseView):
             .limit(num_runs)
             .all()
         )
-        dag_runs.reverse()
-        encoded_runs = [wwwutils.encode_dag_run(dr) for dr in dag_runs]
         dag_run_dates = {dr.execution_date: alchemy_to_dict(dr) for dr in dag_runs}
 
         max_date = max(dag_run_dates, default=None)
@@ -2554,31 +2731,34 @@ class Airflow(AirflowBaseView):
         else:
             external_log_name = None
 
-        min_date = min(dag_run_dates, default=None)
+        default_dag_run_display_number = conf.getint('webserver', 'default_dag_run_display_number')
 
-        tis = dag.get_task_instances(start_date=min_date, end_date=base_date, session=session)
+        num_runs_options = [5, 25, 50, 100, 365]
 
-        data = {
-            'groups': task_group_to_tree(dag.task_group, dag, dag_runs, tis, session),
-            'dag_runs': encoded_runs,
-        }
-
-        # avoid spaces to reduce payload size
-        data = htmlsafe_json_dumps(data, separators=(',', ':'))
+        if default_dag_run_display_number not in num_runs_options:
+            insort_left(num_runs_options, default_dag_run_display_number)
 
         return self.render_template(
-            'airflow/tree.html',
+            'airflow/grid.html',
             operators=sorted({op.task_type: op for op in dag.tasks}.values(), key=lambda x: x.task_type),
             root=root,
             form=form,
             dag=dag,
             doc_md=doc_md,
-            data=data,
             num_runs=num_runs,
             show_external_log_redirect=task_log_reader.supports_external_link,
             external_log_name=external_log_name,
             dag_model=dag_model,
             auto_refresh_interval=conf.getint('webserver', 'auto_refresh_interval'),
+            default_dag_run_display_number=default_dag_run_display_number,
+            filters_drop_down_values=htmlsafe_json_dumps(
+                {
+                    "taskStates": [state.value for state in TaskInstanceState],
+                    "dagStates": [state.value for state in State.dag_states],
+                    "runTypes": [run_type.value for run_type in DagRunType],
+                    "numRuns": num_runs_options,
+                }
+            ),
         )
 
     @expose('/calendar')
@@ -2653,25 +2833,36 @@ class Airflow(AirflowBaseView):
 
         if dag_states and dag_states[-1].data_interval_start and dag_states[-1].data_interval_end:
             last_automated_data_interval = DataInterval(
-                dag_states[-1].data_interval_start, dag_states[-1].data_interval_end
+                timezone.coerce_datetime(dag_states[-1].data_interval_start),
+                timezone.coerce_datetime(dag_states[-1].data_interval_end),
             )
 
             year = last_automated_data_interval.end.year
             restriction = TimeRestriction(dag.start_date, dag.end_date, False)
             dates = collections.Counter()
 
-            while True:
-                info = dag.timetable.next_dagrun_info(
-                    last_automated_data_interval=last_automated_data_interval, restriction=restriction
-                )
-                if info is None:
-                    break
-
-                if info.logical_date.year != year:
-                    break
-
-                last_automated_data_interval = info.data_interval
-                dates[info.logical_date] += 1
+            if isinstance(dag.timetable, CronDataIntervalTimetable):
+                for next in croniter(
+                    dag.timetable.summary, start_time=last_automated_data_interval.end, ret_type=datetime
+                ):
+                    if next is None:
+                        break
+                    if next.year != year:
+                        break
+                    if dag.end_date and next > dag.end_date:
+                        break
+                    dates[next.date()] += 1
+            else:
+                while True:
+                    info = dag.timetable.next_dagrun_info(
+                        last_automated_data_interval=last_automated_data_interval, restriction=restriction
+                    )
+                    if info is None:
+                        break
+                    if info.logical_date.year != year:
+                        break
+                    last_automated_data_interval = info.data_interval
+                    dates[info.logical_date] += 1
 
             data_dag_states.extend(
                 {'date': date.isoformat(), 'state': 'planned', 'count': count}
@@ -2743,6 +2934,7 @@ class Airflow(AirflowBaseView):
         edges = dag_edges(dag)
 
         dt_nr_dr_data = get_date_time_num_runs_dag_runs_form_data(request, session, dag)
+
         dt_nr_dr_data['arrange'] = arrange
         dttm = dt_nr_dr_data['dttm']
         dag_run = dag.get_dagrun(execution_date=dttm)
@@ -2849,7 +3041,7 @@ class Airflow(AirflowBaseView):
         num_runs = request.args.get('num_runs', default=default_dag_run, type=int)
 
         if base_date:
-            base_date = timezone.parse(base_date)
+            base_date = _safe_parse_datetime(base_date)
         else:
             base_date = dag.get_latest_execution_date() or timezone.utcnow()
 
@@ -2996,7 +3188,7 @@ class Airflow(AirflowBaseView):
         num_runs = request.args.get('num_runs', default=default_dag_run, type=int)
 
         if base_date:
-            base_date = timezone.parse(base_date)
+            base_date = _safe_parse_datetime(base_date)
         else:
             base_date = dag.get_latest_execution_date() or timezone.utcnow()
 
@@ -3086,7 +3278,7 @@ class Airflow(AirflowBaseView):
         num_runs = request.args.get('num_runs', default=default_dag_run, type=int)
 
         if base_date:
-            base_date = timezone.parse(base_date)
+            base_date = _safe_parse_datetime(base_date)
         else:
             base_date = dag.get_latest_execution_date() or timezone.utcnow()
 
@@ -3231,6 +3423,8 @@ class Airflow(AirflowBaseView):
 
         tasks = []
         for ti in tis:
+            if not dag.has_task(ti.task_id):
+                continue
             # prev_attempted_tries will reflect the currently running try_number
             # or the try_number of the last complete run
             # https://issues.apache.org/jira/browse/AIRFLOW-2143
@@ -3247,6 +3441,8 @@ class Airflow(AirflowBaseView):
         try_count = 1
         prev_task_id = ""
         for failed_task_instance in ti_fails:
+            if not dag.has_task(failed_task_instance.task_id):
+                continue
             if tf_count != 0 and failed_task_instance.task_id == prev_task_id:
                 try_count += 1
             else:
@@ -3320,7 +3516,7 @@ class Airflow(AirflowBaseView):
         map_index = request.args.get('map_index', -1, type=int)
         execution_date = request.args.get('execution_date')
         link_name = request.args.get('link_name')
-        dttm = timezone.parse(execution_date)
+        dttm = _safe_parse_datetime(execution_date)
         dag = current_app.dag_bag.get_dag(dag_id)
 
         if not dag or task_id not in dag.task_ids:
@@ -3375,7 +3571,7 @@ class Airflow(AirflowBaseView):
 
         dttm = request.args.get('execution_date')
         if dttm:
-            dttm = timezone.parse(dttm)
+            dttm = _safe_parse_datetime(dttm)
         else:
             response = jsonify({'error': f"Invalid execution_date {dttm}"})
             response.status_code = 400
@@ -3389,15 +3585,15 @@ class Airflow(AirflowBaseView):
 
         return json.dumps(task_instances, cls=utils_json.AirflowJsonEncoder)
 
-    @expose('/object/tree_data')
+    @expose('/object/grid_data')
     @auth.has_access(
         [
             (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
             (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
         ]
     )
-    def tree_data(self):
-        """Returns tree data"""
+    def grid_data(self):
+        """Returns grid data"""
         dag_id = request.args.get('dag_id')
         dag = current_app.dag_bag.get_dag(dag_id)
 
@@ -3420,25 +3616,30 @@ class Airflow(AirflowBaseView):
             base_date = dag.get_latest_execution_date() or timezone.utcnow()
 
         with create_session() as session:
-            dag_runs = (
-                session.query(DagRun)
-                .filter(DagRun.dag_id == dag.dag_id, DagRun.execution_date <= base_date)
-                .order_by(DagRun.execution_date.desc())
-                .limit(num_runs)
-                .all()
+            query = session.query(DagRun).filter(
+                DagRun.dag_id == dag.dag_id, DagRun.execution_date <= base_date
             )
+
+            run_type = request.args.get("run_type")
+            if run_type:
+                query = query.filter(DagRun.run_type == run_type)
+
+            run_state = request.args.get("run_state")
+            if run_state:
+                query = query.filter(DagRun.state == run_state)
+
+            dag_runs = query.order_by(DagRun.execution_date.desc()).limit(num_runs).all()
             dag_runs.reverse()
             encoded_runs = [wwwutils.encode_dag_run(dr) for dr in dag_runs]
-            dag_run_dates = {dr.execution_date: alchemy_to_dict(dr) for dr in dag_runs}
-            min_date = min(dag_run_dates, default=None)
-            tis = dag.get_task_instances(start_date=min_date, end_date=base_date, session=session)
             data = {
-                'groups': task_group_to_tree(dag.task_group, dag, dag_runs, tis, session),
+                'groups': dag_to_grid(dag, dag_runs, session),
                 'dag_runs': encoded_runs,
             }
-
         # avoid spaces to reduce payload size
-        return htmlsafe_json_dumps(data, separators=(',', ':'))
+        return (
+            htmlsafe_json_dumps(data, separators=(',', ':'), cls=utils_json.AirflowJsonEncoder),
+            {'Content-Type': 'application/json; charset=utf-8'},
+        )
 
     @expose('/robots.txt')
     @action_logging
@@ -3474,7 +3675,6 @@ class Airflow(AirflowBaseView):
             query = query.filter(Log.event.notin_(excluded_events))
 
         dag_audit_logs = query.all()
-
         content = self.render_template(
             'airflow/dag_audit_log.html',
             dag=dag,
@@ -3705,8 +3905,8 @@ class XComModelView(AirflowModelView):
         permissions.ACTION_CAN_ACCESS_MENU,
     ]
 
-    search_columns = ['key', 'value', 'timestamp', 'dag_id', 'task_id', 'run_id']
-    list_columns = ['key', 'value', 'timestamp', 'dag_id', 'task_id', 'run_id', 'map_index']
+    search_columns = ['key', 'value', 'timestamp', 'dag_id', 'task_id', 'run_id', 'execution_date']
+    list_columns = ['key', 'value', 'timestamp', 'dag_id', 'task_id', 'run_id', 'map_index', 'execution_date']
     base_order = ('dag_run_id', 'desc')
 
     base_filters = [['dag_id', DagFilter, lambda: []]]
@@ -3716,6 +3916,7 @@ class XComModelView(AirflowModelView):
         'timestamp': wwwutils.datetime_f('timestamp'),
         'dag_id': wwwutils.dag_link,
         'map_index': wwwutils.format_map_index,
+        'execution_date': wwwutils.datetime_f('execution_date'),
     }
 
     @action('muldelete', 'Delete', "Are you sure you want to delete selected records?", single=False)
@@ -3779,6 +3980,7 @@ def lazy_add_provider_discovered_options_to_connection_form():
     )
     for key, value in ProvidersManager().connection_form_widgets.items():
         setattr(ConnectionForm, key, value.field)
+        ConnectionModelView.extra_field_name_mapping[key] = value.field_name
         ConnectionModelView.add_columns.append(key)
         ConnectionModelView.edit_columns.append(key)
         ConnectionModelView.extra_fields.append(key)
@@ -3804,8 +4006,8 @@ class ConnectionFormWidget(FormWidget):
     def testable_connection_types(self):
         return [
             connection_type
-            for connection_type, provider_info in ProvidersManager().hooks.items()
-            if provider_info.connection_testable
+            for connection_type, hook_info in ProvidersManager().hooks.items()
+            if hook_info and hook_info.connection_testable
         ]
 
 
@@ -3867,6 +4069,8 @@ class ConnectionModelView(AirflowModelView):
     edit_widget = ConnectionFormWidget
 
     base_order = ('conn_id', 'asc')
+
+    extra_field_name_mapping: Dict[str, str] = {}
 
     @action('muldelete', 'Delete', 'Are you sure you want to delete selected records?', single=False)
     @auth.has_access(
@@ -3953,19 +4157,19 @@ class ConnectionModelView(AirflowModelView):
 
     def process_form(self, form, is_created):
         """Process form data."""
-        conn_type = form.data['conn_type']
         conn_id = form.data["conn_id"]
+        conn_type = form.data["conn_type"]
 
         # The extra value is the combination of custom fields for this conn_type and the Extra field.
         # The extra form field with all extra values (including custom fields) is in the form being processed
         # so we start with those values, and override them with anything in the custom fields.
         extra = {}
 
-        extra_field = form.data.get("extra")
+        extra_json = form.data.get("extra")
 
-        if extra_field:
+        if extra_json:
             try:
-                extra.update(json.loads(extra_field))
+                extra.update(json.loads(extra_json))
             except (JSONDecodeError, TypeError):
                 flash(
                     Markup(
@@ -3974,18 +4178,24 @@ class ConnectionModelView(AirflowModelView):
                         "<p>If connection parameters need to be added to <em>Extra</em>, "
                         "please make sure they are in the form of a single, valid JSON object.</p><br>"
                         "The following <em>Extra</em> parameters were <b>not</b> added to the connection:<br>"
-                        f"{extra_field}",
+                        f"{extra_json}",
                     ),
                     category="error",
                 )
+        del extra_json
 
-        custom_fields = {
-            key: form.data[key]
-            for key in self.extra_fields
-            if key in form.data and key.startswith(f"extra__{conn_type}__")
-        }
-
-        extra.update(custom_fields)
+        for key in self.extra_fields:
+            if key in form.data and key.startswith("extra__"):
+                # Check to ensure the extra field corresponds to the connection type of the form submission
+                # before adding to extra_field_name_mapping.
+                conn_type_from_extra_field = key.split("__")[1]
+                if conn_type_from_extra_field == conn_type:
+                    value = form.data[key]
+                    # Some extra fields have a default value of False so we need to explicitly check the
+                    # value isn't an empty string.
+                    if value != "":
+                        field_name = self.extra_field_name_mapping[key]
+                        extra[field_name] = value
 
         if extra.keys():
             form.extra.data = json.dumps(extra)
@@ -4005,10 +4215,16 @@ class ConnectionModelView(AirflowModelView):
             logging.warning('extra field for %s is not a dictionary', form.data.get('conn_id', '<unknown>'))
             return
 
-        for field in self.extra_fields:
-            value = extra_dictionary.get(field, '')
+        for field_key in self.extra_fields:
+            field_name = self.extra_field_name_mapping[field_key]
+            value = extra_dictionary.get(field_name, '')
+
+            if not value:
+                # check if connection `extra` json is using old prefixed field name style
+                value = extra_dictionary.get(field_key, '')
+
             if value:
-                field = getattr(form, field)
+                field = getattr(form, field_key)
                 field.data = value
 
 
@@ -4643,7 +4859,7 @@ class LogModelView(AirflowModelView):
     ]
 
     list_columns = ['id', 'dttm', 'dag_id', 'task_id', 'event', 'execution_date', 'owner', 'extra']
-    search_columns = ['dag_id', 'task_id', 'event', 'execution_date', 'owner', 'extra']
+    search_columns = ['dttm', 'dag_id', 'task_id', 'event', 'execution_date', 'owner', 'extra']
 
     label_columns = {
         'execution_date': 'Logical Date',
@@ -4998,12 +5214,18 @@ class AutocompleteView(AirflowBaseView):
             return wwwutils.json_response([])
 
         # Provide suggestions of dag_ids and owners
-        dag_ids_query = session.query(DagModel.dag_id.label('item')).filter(
-            ~DagModel.is_subdag, DagModel.is_active, DagModel.dag_id.ilike('%' + query + '%')
-        )
+        dag_ids_query = session.query(
+            sqla.literal('dag').label('type'),
+            DagModel.dag_id.label('name'),
+        ).filter(~DagModel.is_subdag, DagModel.is_active, DagModel.dag_id.ilike('%' + query + '%'))
 
-        owners_query = session.query(func.distinct(DagModel.owners).label('item')).filter(
-            ~DagModel.is_subdag, DagModel.is_active, DagModel.owners.ilike('%' + query + '%')
+        owners_query = (
+            session.query(
+                sqla.literal('owner').label('type'),
+                DagModel.owners.label('name'),
+            )
+            .distinct()
+            .filter(~DagModel.is_subdag, DagModel.is_active, DagModel.owners.ilike('%' + query + '%'))
         )
 
         # Hide DAGs if not showing status: "all"
@@ -5020,8 +5242,9 @@ class AutocompleteView(AirflowBaseView):
         dag_ids_query = dag_ids_query.filter(DagModel.dag_id.in_(filter_dag_ids))
         owners_query = owners_query.filter(DagModel.dag_id.in_(filter_dag_ids))
 
-        payload = [row[0] for row in dag_ids_query.union(owners_query).limit(10).all()]
-
+        payload = [
+            row._asdict() for row in dag_ids_query.union(owners_query).order_by('name').limit(10).all()
+        ]
         return wwwutils.json_response(payload)
 
 
@@ -5081,7 +5304,6 @@ class DagDependenciesView(AirflowBaseView):
             nodes.append(self._node_dict(dag_node_id, dag, "dag"))
 
             for dep in dependencies:
-
                 nodes.append(self._node_dict(dep.node_id, dep.dependency_id, dep.dependency_type))
                 edges.extend(
                     [
